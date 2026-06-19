@@ -1,4 +1,4 @@
-#include "pacman_process.h"
+#include "p1_pacman_process.h"
 
 #include <stdio.h>
 
@@ -10,4 +10,3 @@ void pacman_process_bootstrap(const shared_state_t *state) {
            state->pacman_position.x,
            state->pacman_position.y);
 }
-

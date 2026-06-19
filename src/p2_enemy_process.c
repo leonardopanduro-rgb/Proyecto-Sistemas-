@@ -1,4 +1,4 @@
-#include "enemy_process.h"
+#include "p2_enemy_process.h"
 
 #include <stdio.h>
 
@@ -16,4 +16,3 @@ void enemy_process_bootstrap(const shared_state_t *state) {
                state->ghost_start[i].y);
     }
 }
-

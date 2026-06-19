@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#include "scheduler.h"
+#include "p0_scheduler.h"
 
 int main(int argc, char *argv[]) {
     const char *case_dir = "cases/Caso1";
@@ -14,4 +14,3 @@ int main(int argc, char *argv[]) {
 
     return scheduler_process_main(case_dir);
 }
-

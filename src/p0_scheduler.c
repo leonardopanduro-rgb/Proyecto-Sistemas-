@@ -1,11 +1,11 @@
-#include "scheduler.h"
+#include "p0_scheduler.h"
 
 #include <stdio.h>
 #include <string.h>
 
-#include "enemy_process.h"
+#include "p2_enemy_process.h"
 #include "map.h"
-#include "pacman_process.h"
+#include "p1_pacman_process.h"
 
 static void build_map_path(const char *case_dir, char *output, size_t output_size) {
     snprintf(output, output_size, "%s/%s", case_dir, "map.txt");
@@ -67,4 +67,3 @@ int scheduler_process_main(const char *case_dir) {
     printf("[P0] Avance base completado: arquitectura y mapa listos\n");
     return 0;
 }
-

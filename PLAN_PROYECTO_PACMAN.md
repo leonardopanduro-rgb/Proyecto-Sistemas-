@@ -94,12 +94,12 @@ pacman_concurrente/
     shared_state.h
     map.c
     map.h
-    scheduler.c
-    scheduler.h
-    pacman_process.c
-    pacman_process.h
-    enemy_process.c
-    enemy_process.h
+    p0_scheduler.c
+    p0_scheduler.h
+    p1_pacman_process.c
+    p1_pacman_process.h
+    p2_enemy_process.c
+    p2_enemy_process.h
     movement_queue.c
     movement_queue.h
     sync_utils.c
