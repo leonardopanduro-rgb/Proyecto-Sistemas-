@@ -85,7 +85,6 @@ Hilos recomendados:
 
 ```text
 pacman_concurrente/
-  README.md
   Makefile
   PLAN_PROYECTO_PACMAN.md
 
@@ -130,11 +129,6 @@ pacman_concurrente/
       ghost_2_moves.txt
       ghost_3_moves.txt
       ghost_4_moves.txt
-
-  docs/
-    arquitectura.md
-    preguntas_profesora.md
-    exposicion.md
 ```
 
 ## 4. Variables sugeridas en memoria compartida
@@ -195,43 +189,5 @@ Este orden esta alineado con la rubrica:
 13. Agregar deteccion de colisiones.
 14. Agregar vidas y condiciones de fin.
 15. Agregar `SET_PRIORITY`.
-16. Preparar logs claros para exposicion.
+16. Preparar logs claros para validar el funcionamiento.
 17. Opcional: implementar `P3` renderer.
-
-## 6. Division sugerida para grupo de 3
-
-### Integrante 1: Scheduler e IPC
-
-Encargado de:
-
-- `P0`.
-- Memoria compartida.
-- Semaforos.
-- Scheduler por ticks.
-- Prioridades.
-- Round Robin.
-- Finalizacion ordenada.
-
-### Integrante 2: Pac-Man y mapa
-
-Encargado de:
-
-- Lectura de `map.txt`.
-- Validacion de paredes.
-- `P1`.
-- Cola de movimientos.
-- Threads de Pac-Man.
-- Publicacion de estado en memoria compartida.
-
-### Integrante 3: Fantasmas y colisiones
-
-Encargado de:
-
-- `P2`.
-- 4 threads de fantasmas.
-- Lectura de archivos de fantasmas.
-- `pacman_tracker_thread`.
-- `collision_thread`.
-- Publicacion de eventos de colision.
-
-Todos deben entender la arquitectura completa para la exposicion.
