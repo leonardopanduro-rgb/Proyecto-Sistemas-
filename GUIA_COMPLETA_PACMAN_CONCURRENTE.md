@@ -37,6 +37,142 @@ Lectura rapida:
 - Los semaforos controlan turnos.
 - Los mutex evitan datos corruptos.
 
+### Como se conecta este dibujo con el repo actual
+
+La imagen visual se entiende mejor si cada cuadrado se traduce a archivos reales del proyecto.
+
+```mermaid
+flowchart LR
+    ENTRY["Arranque del programa<br/>src/main.c"]
+    MAPS["Entrada del caso<br/>cases/Caso1/map.txt<br/>cases/Caso1/*_moves.txt"]
+    MAPMOD["Lector y validador de mapa<br/>src/map.c<br/>src/map.h"]
+    COMMON["Tipos y constantes comunes<br/>src/common.c<br/>src/common.h"]
+    P0FILE["Cuadrado P0 Scheduler<br/>src/p0_scheduler.c<br/>src/p0_scheduler.h"]
+    P1FILE["Cuadrado P1 Pac-Man<br/>src/p1_pacman_process.c<br/>src/p1_pacman_process.h"]
+    P2FILE["Cuadrado P2 Fantasmas<br/>src/p2_enemy_process.c<br/>src/p2_enemy_process.h"]
+    STATE["Cilindro Memoria compartida<br/>src/shared_state.h"]
+    BUILD["Compilacion<br/>Makefile"]
+
+    BUILD --> ENTRY
+    ENTRY --> P0FILE
+    MAPS --> MAPMOD
+    MAPMOD --> P0FILE
+    COMMON --> MAPMOD
+    COMMON --> P0FILE
+    COMMON --> P1FILE
+    COMMON --> P2FILE
+    P0FILE --> STATE
+    P0FILE --> P1FILE
+    P0FILE --> P2FILE
+    P1FILE --> STATE
+    P2FILE --> STATE
+```
+
+Traduccion rapida de la imagen:
+
+| Parte del dibujo | Archivo real | Que hace hoy |
+| --- | --- | --- |
+| Arranque, antes de P0 | `src/main.c` | Recibe la carpeta del caso y llama a `scheduler_process_main`. |
+| P0 Scheduler | `src/p0_scheduler.c` y `src/p0_scheduler.h` | Carga el mapa, inicializa el estado base y llama los modulos de P1 y P2. |
+| P1 Pac-Man | `src/p1_pacman_process.c` y `src/p1_pacman_process.h` | Muestra que Pac-Man esta listo y reporta su posicion inicial. |
+| P2 Fantasmas | `src/p2_enemy_process.c` y `src/p2_enemy_process.h` | Muestra que los fantasmas estan listos y reporta las posiciones iniciales de A, B, C y D. |
+| Memoria compartida | `src/shared_state.h` | Define la estructura `shared_state_t`, que sera el contrato comun entre P0, P1 y P2. |
+| Mapa de Pac-Man | `src/map.c` y `src/map.h` | Lee `map.txt`, valida simbolos, valida dimensiones y encuentra `P`, `A`, `B`, `C`, `D`. |
+| Constantes comunes | `src/common.c` y `src/common.h` | Define limites, posiciones, nombres de procesos y nombres de fantasmas. |
+| Casos de prueba | `cases/Caso1/*` | Contiene el mapa y los archivos de movimientos que luego consumiran P1 y P2. |
+| Compilacion | `Makefile` | Define como compilar el proyecto en Linux/WSL con `make`. |
+
+Importante: en el estado actual del GitHub, `P0`, `P1` y `P2` todavia no son procesos separados creados con `fork()`. Ya existen como archivos y modulos separados, que es el primer paso para convertirlos despues en procesos reales. Es como tener el plano electrico antes de cablearlo con POSIX.
+
+### Por que esta arquitectura tiene sentido
+
+La arquitectura no se separo asi por gusto. Se separo asi porque la rubrica pide demostrar conceptos de Sistemas Operativos.
+
+```mermaid
+flowchart TD
+    REQ["Rubrica pide POSIX<br/>procesos, hilos, memoria compartida,<br/>semaforos, mutex, scheduler"]
+    P0WHY["Necesitamos P0<br/>para centralizar decisiones"]
+    P1WHY["Necesitamos P1<br/>para aislar la logica de Pac-Man"]
+    P2WHY["Necesitamos P2<br/>para aislar la logica de fantasmas"]
+    SHMWHY["Necesitamos memoria compartida<br/>porque los procesos no comparten memoria normal"]
+    SEMWHY["Necesitamos semaforos<br/>porque P1 y P2 no deben moverse cuando quieran"]
+    MTXWHY["Necesitamos mutex<br/>porque varios hilos leeran y escribiran datos compartidos"]
+
+    REQ --> P0WHY
+    REQ --> P1WHY
+    REQ --> P2WHY
+    P0WHY --> SHMWHY
+    P1WHY --> SHMWHY
+    P2WHY --> SHMWHY
+    P0WHY --> SEMWHY
+    P1WHY --> SEMWHY
+    P2WHY --> SEMWHY
+    SHMWHY --> MTXWHY
+```
+
+La idea central es esta:
+
+- Si todo estuviera en un solo archivo, seria mas dificil demostrar procesos, comunicacion y sincronizacion.
+- Si `P1` o `P2` decidieran sus propios turnos, el scheduler `P0` seria decorativo.
+- Si `P1` bajara vidas o cambiara prioridades directamente, se romperian las responsabilidades.
+- Si `P2` quitara vidas directamente, habria dos autoridades sobre el estado global.
+- Si no existe `shared_state_t`, cada proceso tendria una version distinta del juego.
+- Si no hay semaforos, Pac-Man y fantasmas avanzarian sin control del scheduler.
+- Si no hay mutex, aparecerian race conditions cuando los hilos lean y escriban al mismo tiempo.
+
+Por eso la regla es:
+
+```text
+P0 manda.
+P1 obedece turno y mueve Pac-Man.
+P2 obedece turno, mueve fantasmas y detecta choques.
+shared_state_t guarda el estado comun.
+Semaforos dicen quien puede actuar.
+Mutex protegen lo que varios pueden tocar a la vez.
+```
+
+### Que hace la arquitectura actual cuando ejecutas el programa
+
+Ahora mismo el flujo real del codigo es este:
+
+```mermaid
+sequenceDiagram
+    participant MAIN as src/main.c
+    participant P0 as src/p0_scheduler.c
+    participant MAP as src/map.c
+    participant STATE as shared_state_t
+    participant P1 as src/p1_pacman_process.c
+    participant P2 as src/p2_enemy_process.c
+
+    MAIN->>P0: scheduler_process_main(case_dir)
+    P0->>MAP: map_load(cases/Caso1/map.txt)
+    MAP-->>P0: mapa validado + posiciones iniciales
+    P0->>STATE: inicializa global_tick, vidas, prioridades, mapa y posiciones
+    P0->>P1: pacman_process_bootstrap(&state)
+    P1-->>P0: imprime posicion inicial de Pac-Man
+    P0->>P2: enemy_process_bootstrap(&state)
+    P2-->>P0: imprime posiciones iniciales de fantasmas
+```
+
+Eso significa que el avance actual ya responde estas preguntas:
+
+- El programa ya sabe leer un caso.
+- El programa ya sabe encontrar a Pac-Man.
+- El programa ya sabe encontrar a los cuatro fantasmas.
+- El programa ya tiene una estructura central de estado.
+- El programa ya esta dividido en P0, P1 y P2 a nivel de archivos.
+
+Pero todavia no responde estas otras:
+
+- Todavia no crea procesos reales con `fork()`.
+- Todavia no crea hilos reales con `pthread_create()`.
+- Todavia no usa memoria compartida real con `mmap()` o `shm_open()`.
+- Todavia no usa semaforos reales.
+- Todavia no mueve personajes.
+- Todavia no detecta colisiones en ejecucion.
+
+Esta diferencia es clave para explicarselo a la profesora: no decimos "ya esta hecho el proyecto concurrente"; decimos "ya esta armada la base modular y validada la entrada para construir encima la concurrencia POSIX".
+
 ## 3. Que esta evaluando realmente el proyecto
 
 La profesora no esta pidiendo solamente un juego bonito. Esta pidiendo una simulacion de Sistemas Operativos.
@@ -753,6 +889,70 @@ src/
   p2_enemy_process.h
 ```
 
+### Explicacion archivo por archivo
+
+Esta tabla sirve para que cualquier integrante pueda abrir el repo y saber donde mirar.
+
+| Archivo | Rol dentro del proyecto | Que hace actualmente | Que hara despues |
+| --- | --- | --- | --- |
+| `src/main.c` | Entrada del programa | Define que caso se ejecuta. Si no recibe argumento, usa `cases/Caso1`. Luego llama a `scheduler_process_main`. | Seguira siendo pequeño. Solo arrancara P0 y pasara la carpeta del caso. |
+| `src/common.h` | Definiciones comunes | Define limites del mapa, cantidad de fantasmas, tipo `position_t` y enum de procesos. | Puede crecer con enums de direccion, codigos de error o tipos comunes. |
+| `src/common.c` | Utilidades comunes | Convierte ids de procesos y fantasmas a nombres imprimibles. | Puede agregar helpers compartidos si no pertenecen a P0, P1, P2 ni mapa. |
+| `src/map.h` | Contrato del modulo de mapa | Define `game_map_t` y declara funciones para cargar, validar e imprimir resumen del mapa. | Se mantendra como interfaz limpia para que P0, P1 y P2 no lean archivos de mapa directamente. |
+| `src/map.c` | Logica de lectura de mapa | Abre `map.txt`, valida simbolos, valida que todas las filas tengan igual ancho y encuentra posiciones iniciales. | Se usara tambien para validar si una celda es transitable antes de mover personajes. |
+| `src/shared_state.h` | Modelo del estado global | Define `shared_state_t` con tick, vidas, mapa, posiciones, prioridades y campos de colision. | Se convertira en la estructura ubicada dentro de memoria compartida real. Tambien agregara semaforos y mutex interproceso si se decide meterlos ahi. |
+| `src/p0_scheduler.h` | Contrato de P0 | Declara `scheduler_process_main`. | Mantendra la entrada publica de P0. |
+| `src/p0_scheduler.c` | Cuadrado P0 Scheduler | Carga el mapa, inicializa `shared_state_t`, define vidas/prioridades iniciales y llama a los bootstraps de P1 y P2. | Creara memoria compartida, semaforos, mutex, hara `fork()`, correra ticks, aplicara prioridades, procesara colisiones y cerrara recursos. |
+| `src/p1_pacman_process.h` | Contrato de P1 | Declara `pacman_process_bootstrap`. | Expondra la funcion principal del proceso P1. |
+| `src/p1_pacman_process.c` | Cuadrado P1 Pac-Man | Imprime que P1 esta listo y muestra la posicion inicial de Pac-Man. | Leera `pacman_moves.txt`, creara threads internos, movera Pac-Man cuando P0 libere su semaforo y publicara su posicion en memoria compartida. |
+| `src/p2_enemy_process.h` | Contrato de P2 | Declara `enemy_process_bootstrap`. | Expondra la funcion principal del proceso P2. |
+| `src/p2_enemy_process.c` | Cuadrado P2 Fantasmas | Imprime que P2 esta listo y muestra la posicion inicial de cada fantasma. | Creara threads de fantasmas, leera `ghost_N_moves.txt`, movera enemigos con turno del scheduler y publicara eventos de colision. |
+| `cases/Caso1/map.txt` | Laberinto del caso 1 | Define paredes, caminos, Pac-Man y fantasmas iniciales. | Sera usado por P0 para inicializar el estado compartido real. |
+| `cases/Caso1/pacman_moves.txt` | Entrada de movimientos de Pac-Man | Esta preparado como archivo de instrucciones. | Lo leera un thread de P1 y lo pondra en una cola de movimientos. |
+| `cases/Caso1/ghost_1_moves.txt` a `ghost_4_moves.txt` | Entrada de movimientos de fantasmas | Estan preparados como archivos de instrucciones. | Cada thread de fantasma consumira su propio archivo o cola de movimientos. |
+| `Makefile` | Compilacion | Define como compilar el ejecutable. | Se ajustara para enlazar `pthread` y cualquier fuente nueva como `sync_utils.c` o `movement_queue.c`. |
+| `PLAN_PROYECTO_PACMAN.md` | Plan resumido | Explica el orden publico del proyecto. | Puede mantenerse como plan corto para entregar o revisar rapido. |
+| `GUIA_COMPLETA_PACMAN_CONCURRENTE.md` | Guia de estudio y arquitectura | Explica conceptos, arquitectura, archivos y siguientes pasos. | Se actualizara conforme se implementen `fork()`, threads, semaforos y scheduler real. |
+
+### Donde encaja cada archivo en la imagen visual
+
+```text
+Imagen visual
+|
++-- P0 Scheduler
+|   +-- src/p0_scheduler.c
+|   +-- src/p0_scheduler.h
+|
++-- P1 Pac-Man
+|   +-- src/p1_pacman_process.c
+|   +-- src/p1_pacman_process.h
+|
++-- P2 Fantasmas
+|   +-- src/p2_enemy_process.c
+|   +-- src/p2_enemy_process.h
+|
++-- Memoria compartida
+|   +-- src/shared_state.h
+|
++-- Semaforos y mutex
+|   +-- Todavia no existen como modulo real
+|   +-- Probable siguiente archivo: src/sync_utils.c
+|   +-- Probable siguiente archivo: src/sync_utils.h
+|
++-- Cola de movimientos de P1
+|   +-- Todavia no existe como modulo real
+|   +-- Probable siguiente archivo: src/movement_queue.c
+|   +-- Probable siguiente archivo: src/movement_queue.h
+|
++-- Lectura del mapa
+|   +-- src/map.c
+|   +-- src/map.h
+|
++-- Base comun
+    +-- src/common.c
+    +-- src/common.h
+```
+
 Todavia falta implementar:
 
 - `fork()`.
@@ -795,6 +995,60 @@ El siguiente orden tiene sentido:
 13. Agregar prioridades y Round Robin.
 14. Agregar `SET_PRIORITY`.
 15. Agregar finalizacion ordenada.
+
+### Proximo avance recomendado en detalle
+
+El proximo avance no deberia empezar por mover fantasmas todavia. Primero conviene convertir la arquitectura modular actual en arquitectura POSIX real.
+
+```mermaid
+flowchart TD
+    A["Estado actual<br/>modulos P0, P1, P2 en archivos separados"]
+    B["Paso 1<br/>P0 crea P1 y P2 con fork"]
+    C["Paso 2<br/>shared_state_t vive en memoria compartida real"]
+    D["Paso 3<br/>P1 y P2 esperan semaforos de turno"]
+    E["Paso 4<br/>P0 ejecuta ticks y despierta a uno por turno"]
+    F["Paso 5<br/>P1 consume movimientos de pacman_moves.txt"]
+    G["Paso 6<br/>P2 consume movimientos de ghost_N_moves.txt"]
+    H["Paso 7<br/>Agregar threads dentro de P1 y P2"]
+    I["Paso 8<br/>Agregar colisiones, prioridades y SET_PRIORITY"]
+
+    A --> B --> C --> D --> E --> F --> G --> H --> I
+```
+
+El avance inmediato podria quedar asi:
+
+1. Crear `sync_utils.c` y `sync_utils.h`.
+2. Mover la inicializacion de memoria compartida a una funcion clara.
+3. Agregar semaforos `sem_pacman_turn` y `sem_enemy_turn`.
+4. Cambiar `scheduler_process_main` para hacer `fork()` de P1 y P2.
+5. Hacer que P1 y P2 impriman su PID y esperen turno.
+6. Hacer un scheduler minimo de 5 a 10 ticks.
+7. En cada tick, P0 libera solo un semaforo.
+8. P1 o P2 imprimen que recibieron turno.
+9. Al final, P0 activa `game_over`.
+10. P0 libera semaforos para que P1 y P2 salgan ordenadamente.
+
+Ese avance todavia no necesita mover personajes. Su objetivo es probar lo mas importante: que ya existen procesos reales, memoria compartida y turnos controlados por semaforos.
+
+Despues de eso recien conviene agregar movimiento:
+
+1. P1 lee `pacman_moves.txt`.
+2. P1 valida paredes con `map_is_walkable`.
+3. P1 actualiza `pacman_position`.
+4. P2 lee archivos de fantasmas.
+5. P2 actualiza posiciones internas.
+6. P2 compara contra Pac-Man.
+7. P2 publica colision.
+8. P0 baja vidas.
+
+Y despues de movimiento conviene agregar threads:
+
+1. En P1, thread lector, thread ejecutor y thread publicador.
+2. En P2, thread controlador, cuatro threads de fantasmas, tracker de Pac-Man y detector de colisiones.
+3. Agregar mutex para proteger colas, posiciones, prioridades y colisiones.
+4. Agregar `SET_PRIORITY` y Round Robin.
+
+La razon de este orden es simple: primero se prueba la comunicacion entre procesos; luego se agrega logica de juego; al final se agregan hilos, prioridades y condiciones de carrera. Si se intenta hacer todo junto, los errores se mezclan y cuesta saber si fallo el mapa, el `fork()`, el semaforo, el movimiento o el thread.
 
 ## 20. Que debe poder responder cada integrante
 
