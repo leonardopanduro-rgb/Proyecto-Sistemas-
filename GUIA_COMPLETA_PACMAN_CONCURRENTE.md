@@ -12,30 +12,65 @@ El proyecto simula un Pac-Man donde un proceso principal `P0` funciona como sche
 
 ```mermaid
 flowchart LR
-    P0["P0 Scheduler<br/>decide ticks, prioridades y fin del juego"]
-    P1["P1 Pac-Man<br/>lee movimientos y publica posicion"]
-    P2["P2 Fantasmas<br/>mueve enemigos y detecta colisiones"]
-    SHM[("Memoria compartida<br/>estado global del juego")]
-    SEM["Semaforos<br/>dan permiso de turno"]
-    MTX["Mutex<br/>protegen datos compartidos"]
+    MAP["map.txt<br/>moves.txt"]
+    P0["P0 Scheduler"]
+    P1["P1 Pac-Man"]
+    P2["P2 Fantasmas"]
+    SHM[("shared_state_t<br/>memoria compartida")]
 
-    P0 --> SEM
-    SEM --> P1
-    SEM --> P2
+    P0_MAIN(("scheduler_process_main"))
+    P0_TICK(("tick_thread"))
+    P0_SCHED(("scheduler_thread"))
+    P0_SIG(("signal_thread"))
+    P0_SEMP(("sem_pacman_turn"))
+    P0_SEME(("sem_enemy_turn"))
+    P0_MTX(("priority_mutex"))
+
+    P1_READER(("movement_reader_thread"))
+    P1_EXEC(("movement_executor_thread"))
+    P1_PUB(("pacman_publisher_thread"))
+    P1_MTX(("queue_mutex"))
+
+    P2_CTRL(("enemy_controller_thread"))
+    P2_GHOSTS(("ghost_threads_1_4"))
+    P2_TRACK(("pacman_tracker_thread"))
+    P2_COLL(("collision_thread"))
+    P2_MTX(("collision_mutex"))
+
+    MAP --> P0
+    P0 --- P0_MAIN
+    P0 --- P0_TICK
+    P0 --- P0_SCHED
+    P0 --- P0_SIG
+    P0 --- P0_SEMP
+    P0 --- P0_SEME
+    P0 --- P0_MTX
+
+    P1 --- P1_READER
+    P1 --- P1_EXEC
+    P1 --- P1_PUB
+    P1 --- P1_MTX
+
+    P2 --- P2_CTRL
+    P2 --- P2_GHOSTS
+    P2 --- P2_TRACK
+    P2 --- P2_COLL
+    P2 --- P2_MTX
+
+    P0_SEMP --> P1
+    P0_SEME --> P2
     P0 <--> SHM
     P1 <--> SHM
     P2 <--> SHM
-    MTX --> SHM
 ```
 
 Lectura rapida:
 
-- `P0` decide quien avanza.
-- `P1` mueve a Pac-Man.
-- `P2` mueve fantasmas y avisa colisiones.
-- La memoria compartida permite que los procesos se comuniquen.
-- Los semaforos controlan turnos.
-- Los mutex evitan datos corruptos.
+- `P0` contiene la logica del scheduler y controla los semaforos de turno.
+- `P1` contiene los hilos de lectura, ejecucion y publicacion de Pac-Man.
+- `P2` contiene el controlador, los hilos de fantasmas, el tracker y el detector de colisiones.
+- La memoria compartida es el estado comun que consultan `P0`, `P1` y `P2`.
+- Los mutex aparecen anexados al proceso que protege o coordina ese acceso.
 
 ### Como se conecta este dibujo con el repo actual
 
@@ -838,12 +873,13 @@ flowchart TD
     E --> F["P1 y P2 esperan turno"]
     F --> G["P0 incrementa tick"]
     G --> H["P0 procesa solicitudes de prioridad"]
-    H --> I{"Quien tiene mayor prioridad?"}
-    I -->|Pac-Man| J["P0 libera sem_pacman_turn"]
-    I -->|Enemigos| K["P0 libera sem_enemy_turn"]
-    I -->|Empate| L["Round Robin"]
-    L --> J
-    L --> K
+    H --> I{"prioridad_pacman > prioridad_enemy?"}
+    I -->|Si| J["P0 libera sem_pacman_turn"]
+    I -->|No| L{"prioridad_enemy > prioridad_pacman?"}
+    L -->|Si| K["P0 libera sem_enemy_turn"]
+    L -->|No| RR{"Round Robin<br/>turno de P1?"}
+    RR -->|Si| J
+    RR -->|No| K
     J --> M["P1 ejecuta una instruccion"]
     K --> N["P2 mueve fantasmas"]
     M --> O["Actualizar memoria compartida"]
