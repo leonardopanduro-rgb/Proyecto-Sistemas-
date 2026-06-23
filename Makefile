@@ -1,7 +1,7 @@
 CC ?= gcc
-CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -g
+CFLAGS ?= -std=c11 -Wall -Wextra -Wpedantic -g -pthread
 CPPFLAGS ?= -Isrc
-LDFLAGS ?=
+LDFLAGS ?= -pthread
 
 TARGET := build/pacman_concurrente
 SRCS := $(wildcard src/*.c)
@@ -25,4 +25,3 @@ build:
 
 clean:
 	rm -rf build
-
