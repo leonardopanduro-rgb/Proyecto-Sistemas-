@@ -6,127 +6,120 @@
 #include <unistd.h>
 
 #include "common.h"
+#include "movement_queue.h"
 
 typedef struct {
-    /* state apunta a la memoria compartida creada por P0. */
     shared_state_t *state;
-
-    /* moves_path guarda la ruta hacia pacman_moves.txt. */
     char moves_path[MAX_PATH_LENGTH];
+    movement_queue_t queue; 
 } pacman_thread_args_t;
 
-static void build_pacman_moves_path(const char *case_dir,
-                                    char *output,
-                                    size_t output_size) {
-    /* Construye la ruta del archivo de movimientos de Pac-Man. */
+static void build_pacman_moves_path(const char *case_dir, char *output, size_t output_size) {
     snprintf(output, output_size, "%s/%s", case_dir, "pacman_moves.txt");
 }
 
 static int line_has_content(const char *line) {
-    /* Retorna verdadero si la linea no esta vacia. */
     return line[0] != '\0' && line[0] != '\n' && line[0] != '\r';
 }
 
+
+static movement_cmd_t parse_command(const char *line) {
+    movement_cmd_t cmd = {CMD_NONE, 0};
+    if (strncmp(line, "UP", 2) == 0) cmd.type = CMD_UP;
+    else if (strncmp(line, "DOWN", 4) == 0) cmd.type = CMD_DOWN;
+    else if (strncmp(line, "LEFT", 4) == 0) cmd.type = CMD_LEFT;
+    else if (strncmp(line, "RIGHT", 5) == 0) cmd.type = CMD_RIGHT;
+    else if (sscanf(line, "SET_PRIORITY %d", &cmd.value) == 1) cmd.type = CMD_SET_PRIORITY;
+    return cmd;
+}
+
 static void *movement_reader_thread(void *arg) {
-    /* Convierte el argumento generico void* al tipo real usado por este hilo. */
     pacman_thread_args_t *args = (pacman_thread_args_t *)arg;
-
-    /* Abre el archivo pacman_moves.txt en modo lectura. */
     FILE *file = fopen(args->moves_path, "r");
-
-    /* line guarda temporalmente cada linea leida del archivo. */
     char line[128];
+    int moves = 0; // Recuperamos el contador
 
-    /* moves cuenta cuantas instrucciones no vacias encontro el hilo. */
-    int moves = 0;
+    if (file == NULL) return NULL;
 
-    /* Si fopen falla, el hilo reporta el error y termina. */
-    if (file == NULL) {
-        perror("[P1] fopen pacman_moves.txt");
-        return NULL;
-    }
-
-    /* Lee el archivo linea por linea hasta llegar al final. */
     while (fgets(line, sizeof(line), file) != NULL) {
-        /* Solo cuenta lineas que realmente tienen contenido. */
         if (line_has_content(line)) {
-            moves++;
+            movement_cmd_t cmd = parse_command(line);
+            if (cmd.type != CMD_NONE) {
+                queue_push(&args->queue, cmd);
+                moves++;
+            }
         }
     }
-
-    /* Cierra el archivo porque ya no se necesita. */
     fclose(file);
+    
+    
+    // se empuja comandos vacios al final para que el ejecutor no se quede bloqueado (deadlock) esperando si el archivo se acaba.
+    for (int i = 0; i < 50; i++) {
+        movement_cmd_t eof_cmd = {CMD_NONE, 0};
+        queue_push(&args->queue, eof_cmd);
+    }
 
-    /* Bloquea el mutex antes de escribir en memoria compartida. */
+    // Publicamos en memoria compartida y en consola
     pthread_mutex_lock(&args->state->state_mutex);
-
-    /* Publica cuantas instrucciones de Pac-Man fueron leidas. */
     args->state->pacman_moves_loaded = moves;
-
-    /* Libera el mutex despues de actualizar el estado. */
     pthread_mutex_unlock(&args->state->state_mutex);
+    printf("[P1][movement_reader_thread] Instrucciones leídas: %d\n", moves);
 
-    /* Muestra en consola el trabajo realizado por el hilo lector. */
-    printf("[P1][movement_reader_thread] Instrucciones leidas: %d\n", moves);
-
-    /* Termina el hilo correctamente. */
     return NULL;
 }
 
 static void *movement_executor_thread(void *arg) {
-    /* Convierte el argumento generico void* al tipo real usado por este hilo. */
     pacman_thread_args_t *args = (pacman_thread_args_t *)arg;
+    shared_state_t *s = args->state;
 
-    /* El hilo se mantiene vivo mientras P0 no marque game_over. */
     while (1) {
-        /* Espera bloqueado hasta que P0 libere el turno de Pac-Man. */
-        if (sem_wait(&args->state->sem_pacman_turn) != 0) {
-            perror("[P1] sem_wait sem_pacman_turn");
-            return NULL;
-        }
+        if (sem_wait(&s->sem_pacman_turn) != 0) break; // Espera el turno de P0
 
-        /* Bloquea el estado compartido antes de leer game_over y global_tick. */
-        pthread_mutex_lock(&args->state->state_mutex);
-
-        /* Si P0 ya termino el juego, este hilo sale del bucle. */
-        if (args->state->game_over) {
-            pthread_mutex_unlock(&args->state->state_mutex);
+        pthread_mutex_lock(&s->state_mutex);
+        if (s->game_over) {
+            pthread_mutex_unlock(&s->state_mutex);
             break;
         }
+        s->pacman_turns_executed++;
+        pthread_mutex_unlock(&s->state_mutex);
 
-        /* Cuenta un turno ejecutado por Pac-Man. */
-        args->state->pacman_turns_executed++;
+        // Consume de la cola
+        movement_cmd_t cmd = queue_pop(&args->queue);
 
-        /* Copia el tick actual para imprimirlo fuera del mutex. */
-        int tick = args->state->global_tick;
+        if (cmd.type == CMD_SET_PRIORITY) {
+            // Escribe en el Buzón protegido
+            pthread_mutex_lock(&s->priority_mutex);
+            s->pending_priority_pacman = cmd.value;
+            s->priority_request_active = 1;
+            pthread_mutex_unlock(&s->priority_mutex);
+            printf("[P1] Solicitud de cambio de prioridad a %d enviada al planificador\n", cmd.value);
+        } 
+        else if (cmd.type != CMD_NONE) {
+            // Lógica Espacial
+            pthread_mutex_lock(&s->state_mutex);
+            int nx = s->pacman_position.x;
+            int ny = s->pacman_position.y;
+            
+            if (cmd.type == CMD_UP) ny--;
+            else if (cmd.type == CMD_DOWN) ny++;
+            else if (cmd.type == CMD_LEFT) nx--;
+            else if (cmd.type == CMD_RIGHT) nx++;
 
-        /* Copia el numero de turno de P1 para imprimirlo fuera del mutex. */
-        int turn = args->state->pacman_turns_executed;
-
-        /* Copia la posicion actual de Pac-Man para imprimirla fuera del mutex. */
-        position_t pos = args->state->pacman_position;
-
-        /* Libera el mutex lo antes posible. */
-        pthread_mutex_unlock(&args->state->state_mutex);
-
-        /* En este avance todavia no se mueve, solo se demuestra el turno. */
-        printf("[P1][movement_executor_thread] Tick %d, turno %d, Pac-Man sigue en (%d,%d)\n",
-               tick,
-               turn,
-               pos.x,
-               pos.y);
-
-        /* Avisa a P0 que el turno de P1 ya termino. */
-        if (sem_post(&args->state->sem_turn_done) != 0) {
-            perror("[P1] sem_post sem_turn_done");
-            return NULL;
+            // Validar contra el mapa en Memoria Compartida
+            char cell = s->map_grid[ny][nx];
+            if (cell != 'X') {
+                s->pacman_position.x = nx;
+                s->pacman_position.y = ny;
+                printf("[P1] Pac-Man se mueve a (%d, %d)\n", nx, ny);
+            } else {
+                printf("[P1] Pac-Man intentó moverse a (%d, %d) pero hay pared (X)\n", nx, ny);
+            }
+            pthread_mutex_unlock(&s->state_mutex);
         }
+
+        // Avisa a P0 que P1 terminó
+        sem_post(&s->sem_turn_done); 
     }
-
-    /* Mensaje de cierre normal del hilo. */
-    printf("[P1][movement_executor_thread] game_over recibido, hilo termina\n");
-
-    /* Termina el hilo correctamente. */
     return NULL;
 }
 
@@ -155,7 +148,7 @@ int pacman_process_main(shared_state_t *state, const char *case_dir) {
 
     /* Construye la ruta hacia pacman_moves.txt. */
     build_pacman_moves_path(case_dir, args.moves_path, sizeof(args.moves_path));
-
+    queue_init(&args.queue); // Inicializa la cola de movimientos
     /* Muestra el PID real del proceso P1. */
     printf("[P1] Proceso real iniciado con PID %ld\n", (long)getpid());
 

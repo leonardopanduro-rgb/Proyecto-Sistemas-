@@ -85,47 +85,57 @@ static process_id_t choose_next_process(shared_state_t *state,
 }
 
 static int run_scheduler_ticks(shared_state_t *state) {
-    /* Arrancamos como si el ultimo turno hubiera sido de enemigos para que P1 inicie. */
     process_id_t last_round_robin = PROCESS_ENEMY;
 
-    /* P0 ejecuta una cantidad limitada de ticks para este avance demostrativo. */
     for (int tick = 1; tick <= state->max_ticks; ++tick) {
-        /* Protege global_tick porque P1 y P2 tambien pueden leerlo. */
+        
+        // 1. REGLA DEL KERNEL: Evaluar Fin de Juego por Vidas
         pthread_mutex_lock(&state->state_mutex);
-
-        /* Actualiza el tick global visible para todos los procesos. */
+        if (state->pacman_lives <= 0) {
+            state->game_over = 1;
+            printf("[P0] TICK %d: ¡Pac-Man perdió todas sus vidas! GAME OVER.\n", tick);
+            pthread_mutex_unlock(&state->state_mutex);
+            break;
+        }
         state->global_tick = tick;
-
-        /* Libera el mutex luego de escribir el tick. */
         pthread_mutex_unlock(&state->state_mutex);
 
-        /* Decide si el turno sera de P1 o P2 segun prioridades y Round Robin. */
-        process_id_t selected = choose_next_process(state, &last_round_robin);
+        // 2. REGLA DEL KERNEL: Procesar Buzones de Prioridad
+        pthread_mutex_lock(&state->priority_mutex);
+        if (state->priority_request_active) {
+            state->prioridad_pacman = state->pending_priority_pacman;
+            state->priority_request_active = 0;
+            printf("[P0] Sistema: Prioridad de Pac-Man actualizada a %d\n", state->prioridad_pacman);
+        }
+        if (state->enemy_priority_request_active) {
+            state->prioridad_enemy = state->pending_priority_enemy;
+            state->enemy_priority_request_active = 0;
+            printf("[P0] Sistema: Prioridad de Enemigos actualizada a %d\n", state->prioridad_enemy);
+        }
+        pthread_mutex_unlock(&state->priority_mutex);
 
-        /* Muestra en consola la decision del scheduler. */
+        // 3. REGLA DEL KERNEL: Procesar Colisiones
+        pthread_mutex_lock(&state->collision_mutex);
+        if (state->collision_detected) {
+            pthread_mutex_lock(&state->state_mutex);
+            state->pacman_lives--;
+            pthread_mutex_unlock(&state->state_mutex);
+            
+            state->collision_detected = 0;
+            printf("[P0] ¡Sistema registra colisión con fantasma %d! Vidas restantes: %d\n", 
+                    state->collision_ghost_id, state->pacman_lives);
+        }
+        pthread_mutex_unlock(&state->collision_mutex);
+
+        // --- LÓGICA DE PLANIFICACIÓN (Ya la tenías) ---
+        process_id_t selected = choose_next_process(state, &last_round_robin);
         printf("[P0] Tick %d: turno para %s\n", tick, process_name(selected));
 
-        /* Si gano P1, P0 libera el semaforo de Pac-Man. */
-        if (selected == PROCESS_PACMAN) {
-            if (sem_post(&state->sem_pacman_turn) != 0) {
-                perror("[P0] sem_post sem_pacman_turn");
-                return -1;
-            }
-        } else {
-            /* Si gano P2, P0 libera el semaforo de enemigos. */
-            if (sem_post(&state->sem_enemy_turn) != 0) {
-                perror("[P0] sem_post sem_enemy_turn");
-                return -1;
-            }
-        }
+        if (selected == PROCESS_PACMAN) sem_post(&state->sem_pacman_turn);
+        else sem_post(&state->sem_enemy_turn);
 
-        /* P0 espera hasta que P1 o P2 avise que termino su turno. */
-        if (sem_wait(&state->sem_turn_done) != 0) {
-            perror("[P0] sem_wait sem_turn_done");
-            return -1;
-        }
+        if (sem_wait(&state->sem_turn_done) != 0) return -1;
     }
-
     return 0;
 }
 
