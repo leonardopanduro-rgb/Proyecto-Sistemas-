@@ -71,18 +71,26 @@ static void *movement_reader_thread(void *arg) {
 static void *movement_executor_thread(void *arg) {
     pacman_thread_args_t *args = (pacman_thread_args_t *)arg;
     shared_state_t *s = args->state;
+    int local_round = 1; // RASTREADOR DE RONDA
 
     while (1) {
-        if (sem_wait(&s->sem_pacman_turn) != 0) break; // Espera el turno de P0
+        if (sem_wait(&s->sem_pacman_turn) != 0) break;
 
         pthread_mutex_lock(&s->state_mutex);
         if (s->game_over) {
             pthread_mutex_unlock(&s->state_mutex);
             break;
         }
+        
+        // ¡NUEVO! Si P0 cambió de ronda, rebobinamos la cola
+        if (s->current_round > local_round) {
+            queue_reset(&args->queue);
+            local_round = s->current_round;
+            printf("[P1] ¡Nueva ronda detectada! Rebobinando movimientos de Pac-Man.\n");
+        }
+        
         s->pacman_turns_executed++;
         pthread_mutex_unlock(&s->state_mutex);
-
         // Consume de la cola
         movement_cmd_t cmd = queue_pop(&args->queue);
 

@@ -21,8 +21,9 @@ static void shared_state_init_from_map(shared_state_t *state, const game_map_t *
 
     /* Inicializa los campos globales que P0 controlara durante la simulacion. */
     state->global_tick = 0;
-    state->max_ticks = 8;
+    state->max_ticks = 100;
     state->game_over = 0;
+    state->current_round = 1;
 
     /* Inicializa datos propios de Pac-Man. */
     state->pacman_score = 0;
@@ -43,6 +44,7 @@ static void shared_state_init_from_map(shared_state_t *state, const game_map_t *
     /* Copia las posiciones iniciales de los cuatro fantasmas. */
     for (int i = 0; i < NUM_GHOSTS; ++i) {
         state->ghost_start[i] = map->ghost_start[i];
+        state->ghost_position[i] = map->ghost_start[i];
     }
 
     /* Copia la grilla para que P1 y P2 puedan leerla desde memoria compartida. */
@@ -89,18 +91,18 @@ static int run_scheduler_ticks(shared_state_t *state) {
 
     for (int tick = 1; tick <= state->max_ticks; ++tick) {
         
-        // 1. REGLA DEL KERNEL: Evaluar Fin de Juego por Vidas
+        // 1. REGLA: Evaluar Fin de Juego por Vidas
         pthread_mutex_lock(&state->state_mutex);
         if (state->pacman_lives <= 0) {
             state->game_over = 1;
-            printf("[P0] TICK %d: ¡Pac-Man perdió todas sus vidas! GAME OVER.\n", tick);
+            printf("\n[P0] TICK %d: ¡Pac-Man perdió todas sus vidas! GAME OVER.\n", tick);
             pthread_mutex_unlock(&state->state_mutex);
             break;
         }
         state->global_tick = tick;
         pthread_mutex_unlock(&state->state_mutex);
 
-        // 2. REGLA DEL KERNEL: Procesar Buzones de Prioridad
+        // 2. REGLA: Procesar Buzones de Prioridad
         pthread_mutex_lock(&state->priority_mutex);
         if (state->priority_request_active) {
             state->prioridad_pacman = state->pending_priority_pacman;
@@ -114,20 +116,30 @@ static int run_scheduler_ticks(shared_state_t *state) {
         }
         pthread_mutex_unlock(&state->priority_mutex);
 
-        // 3. REGLA DEL KERNEL: Procesar Colisiones
+        // 3. REGLA: PROCESAR COLISIONES (¡TU IDEA DE REINICIO!)
         pthread_mutex_lock(&state->collision_mutex);
         if (state->collision_detected) {
             pthread_mutex_lock(&state->state_mutex);
             state->pacman_lives--;
+            
+            // REINICIO AL ESTADO ORIGINAL
+            state->pacman_position = state->pacman_start;
+            for (int i = 0; i < NUM_GHOSTS; ++i) {
+                state->ghost_position[i] = state->ghost_start[i];
+            }
+            state->current_round++;
             pthread_mutex_unlock(&state->state_mutex);
             
-            state->collision_detected = 0;
-            printf("[P0] ¡Sistema registra colisión con fantasma %d! Vidas restantes: %d\n", 
-                    state->collision_ghost_id, state->pacman_lives);
+            state->collision_detected = 0; // Apagamos la alarma
+            
+            printf("\n=======================================================\n");
+            printf("[P0] ¡COLISIÓN DETECTADA! Fantasma %s atrapó a Pac-Man\n", ghost_label(state->collision_ghost_id));
+            printf("[P0] Vidas restantes: %d. Reiniciando posiciones...\n", state->pacman_lives);
+            printf("=======================================================\n\n");
         }
         pthread_mutex_unlock(&state->collision_mutex);
 
-        // --- LÓGICA DE PLANIFICACIÓN (Ya la tenías) ---
+        // --- LÓGICA DE PLANIFICACIÓN ---
         process_id_t selected = choose_next_process(state, &last_round_robin);
         printf("[P0] Tick %d: turno para %s\n", tick, process_name(selected));
 

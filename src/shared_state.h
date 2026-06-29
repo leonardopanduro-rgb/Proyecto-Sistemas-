@@ -55,6 +55,9 @@ typedef struct {
     /* Vidas restantes de Pac-Man. */
     int pacman_lives;
 
+    /* Ronda actual (aumenta tras cada colisión) para reiniciar movimientos. */
+    int current_round;
+    
     /* Cantidad de turnos que P1 ejecuto. */
     int pacman_turns_executed;
 
@@ -63,6 +66,9 @@ typedef struct {
 
     /* Posiciones iniciales de los cuatro fantasmas. */
     position_t ghost_start[NUM_GHOSTS];
+
+    /* Posiciones actuales de los cuatro fantasmas. (¡NUEVO!) */
+    position_t ghost_position[NUM_GHOSTS];
 
     /* Cantidad de turnos que P2 ejecuto. */
     int ghost_turns_executed;

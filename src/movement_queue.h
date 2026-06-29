@@ -27,5 +27,5 @@ typedef struct {
 void queue_init(movement_queue_t *q);
 void queue_push(movement_queue_t *q, movement_cmd_t cmd);
 movement_cmd_t queue_pop(movement_queue_t *q);
-
+void queue_reset(movement_queue_t *q);
 #endif
