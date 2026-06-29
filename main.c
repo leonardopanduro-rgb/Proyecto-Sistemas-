@@ -14,19 +14,19 @@
 #include "collision.h"
 
 /*
-    CHECKPOINT 8
+    CHECKPOINT 9
 
     Objetivo:
-    - P0 controla el avance del juego mediante ticks.
-    - P0 decide a quién dar turno.
-    - P0 espera sem_turn_done antes de avanzar.
+    - P0 controla ticks globales.
+    - P0 decide el turno según prioridad.
+    - Si hay empate, P0 aplica Round Robin.
+    - P1 y P2 siguen esperando semáforos.
+    - P0 sigue esperando sem_turn_done.
     - P2 solo publica colisiones.
-    - P0 procesa colisiones, baja vidas y activa game_over.
+    - P0 procesa colisiones y baja vidas.
 
     Todavía NO implementamos:
-    - prioridades reales
-    - Round Robin formal por empate
-    - SET_PRIORITY
+    - SET_PRIORITY desde archivos
     - hilos internos
     - mutex fuertes
 */
@@ -77,6 +77,18 @@ void inicializar_shared(SharedData *shared) {
     shared->collision_tick = -1;
     shared->collision_ghost_id = -1;
 
+    /*
+        En Checkpoint 9 usamos estas prioridades para decidir turnos.
+
+        Como ambas empiezan iguales, se debe aplicar Round Robin.
+        Para probar prioridad mayor de Pac-Man puedes poner:
+            prioridad_pacman = 50;
+            prioridad_enemy = 30;
+
+        Para probar prioridad mayor de enemigos:
+            prioridad_pacman = 30;
+            prioridad_enemy = 50;
+    */
     shared->prioridad_pacman = 30;
     shared->prioridad_enemy = 30;
 
@@ -142,27 +154,54 @@ int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
 }
 
 /*
-    En Checkpoint 8 todavía elegimos turno de forma simple:
-    tick impar -> P1
-    tick par   -> P2
+    Decide qué proceso recibe turno.
 
-    En Checkpoint 9 esto cambiará a prioridades y Round Robin.
+    Retorna:
+    1 -> P1 Pac-Man
+    2 -> P2 Enemigos
+
+    ultimo_turno:
+    - sirve para Round Robin cuando hay empate.
+    - si el último fue P1, ahora toca P2.
+    - si el último fue P2, ahora toca P1.
 */
-int elegir_turno_basico_por_tick(int tick) {
-    if (tick % 2 == 1) {
-        return 1;   // P1
+int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
+    printf("[P0] Prioridad Pac-Man=%d | Prioridad Enemigos=%d\n",
+           shared->prioridad_pacman,
+           shared->prioridad_enemy);
+
+    if (shared->prioridad_pacman > shared->prioridad_enemy) {
+        printf("[P0] Pac-Man tiene mayor prioridad\n");
+        *ultimo_turno = 1;
+        return 1;
     }
 
-    return 2;       // P2
+    if (shared->prioridad_enemy > shared->prioridad_pacman) {
+        printf("[P0] Enemigos tienen mayor prioridad\n");
+        *ultimo_turno = 2;
+        return 2;
+    }
+
+    /*
+        Empate de prioridades:
+        aplicamos Round Robin.
+    */
+   
+   printf("[P0] Empate de prioridades: aplicando Round Robin\n");
+
+   if (*ultimo_turno == 1) {
+       *ultimo_turno = 2;
+       return 2;
+   }
+
+   *ultimo_turno = 1;
+   return 1;
 }
+
+
 
 /*
     P0 procesa la colisión publicada por P2.
-
-    Regla importante:
-    P2 NO baja vidas.
-    P2 NO activa game_over.
-    P2 solo publica collision_detected, collision_tick y collision_ghost_id.
 */
 void procesar_colision_si_existe(SharedData *shared) {
     if (shared->collision_detected == 1) {
@@ -181,9 +220,6 @@ void procesar_colision_si_existe(SharedData *shared) {
             printf("[P0] game_over = 1\n");
         }
 
-        /*
-            Limpiamos el evento para no procesar la misma colisión dos veces.
-        */
         shared->collision_detected = 0;
         shared->collision_tick = -1;
         shared->collision_ghost_id = -1;
@@ -327,8 +363,8 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     P0 = scheduler_process
 */
 void scheduler_process(const char *carpeta_caso) {
-    printf("Pac-Man concurrente POSIX - Checkpoint 8\n");
-    printf("[P0] scheduler_process con ticks globales\n");
+    printf("Pac-Man concurrente POSIX - Checkpoint 9\n");
+    printf("[P0] scheduler_process con prioridades y Round Robin\n");
     printf("[P0] PID=%d\n", getpid());
 
     SharedData *shared = crear_memoria_compartida();
@@ -357,6 +393,10 @@ void scheduler_process(const char *carpeta_caso) {
 
     printf("[P0] max_ticks = %d\n",
            shared->max_ticks);
+
+    printf("[P0] Prioridades iniciales: Pac-Man=%d, Enemigos=%d\n",
+           shared->prioridad_pacman,
+           shared->prioridad_enemy);
 
     pid_t pid_pacman = fork();
 
@@ -387,8 +427,11 @@ void scheduler_process(const char *carpeta_caso) {
            pid_enemy);
 
     /*
-        Ciclo principal del scheduler.
+        ultimo_turno sirve para Round Robin.
+        Lo iniciamos en 2 para que, si hay empate, el primer turno sea P1.
     */
+    int ultimo_turno = 2;
+
     while (shared->game_over == 0 &&
            shared->global_tick < shared->max_ticks) {
 
@@ -397,7 +440,7 @@ void scheduler_process(const char *carpeta_caso) {
         printf("\n[P0] ==============================\n");
         printf("[P0] Tick global %d\n", shared->global_tick);
 
-        int turno = elegir_turno_basico_por_tick(shared->global_tick);
+        int turno = elegir_turno_por_prioridad(shared, &ultimo_turno);
 
         if (turno == 1) {
             printf("[P0] Turno elegido: P1\n");
@@ -407,17 +450,10 @@ void scheduler_process(const char *carpeta_caso) {
             sem_post(&shared->sem_enemy_turn);
         }
 
-        /*
-            P0 espera a que P1 o P2 terminen.
-            Si quitamos esto, los ticks pueden avanzar sin control.
-        */
         sem_wait(&shared->sem_turn_done);
 
         printf("[P0] Fin de turno confirmado\n");
 
-        /*
-            Después de cada turno, P0 revisa si P2 publicó una colisión.
-        */
         procesar_colision_si_existe(shared);
 
         imprimir_estado_tick(shared);
@@ -431,9 +467,6 @@ void scheduler_process(const char *carpeta_caso) {
     printf("\n[P0] Condición de finalización detectada\n");
     printf("[P0] game_over = %d\n", shared->game_over);
 
-    /*
-        Liberamos a P1 y P2 por si están bloqueados esperando turno.
-    */
     sem_post(&shared->sem_pacman_turn);
     sem_post(&shared->sem_enemy_turn);
 
@@ -449,7 +482,7 @@ void scheduler_process(const char *carpeta_caso) {
     liberar_memoria_compartida(shared);
 
     printf("[P0] Recursos liberados\n");
-    printf("Fin de Checkpoint 8\n");
+    printf("Fin de Checkpoint 9\n");
 }
 
 int main(int argc, char *argv[]) {
