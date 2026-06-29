@@ -171,6 +171,11 @@ void inicializar_shared(SharedData *shared) {
     shared->input_error = 0;
     shared->input_error_process = 0;
 
+    shared->pacman_moves_finished = 0;
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        shared->ghost_moves_finished[i] = 0;
+    }
+
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
@@ -344,6 +349,61 @@ int procesar_error_entrada(SharedData *shared) {
     }
 
     return 0;
+}
+
+/*
+    Punto 10.
+    P1 avisa que ya no le quedan instrucciones validas.
+*/
+void publicar_pacman_agotado(SharedData *shared) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    if (shared->pacman_moves_finished == 0) {
+        shared->pacman_moves_finished = 1;
+        printf("[P1] Sin mas instrucciones: entradas de Pac-Man agotadas\n");
+    }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+}
+
+/*
+    Punto 10.
+    P2 avisa que un fantasma agoto su archivo de movimientos.
+*/
+void publicar_fantasma_agotado(SharedData *shared, int ghost_id) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    if (shared->ghost_moves_finished[ghost_id] == 0) {
+        shared->ghost_moves_finished[ghost_id] = 1;
+        printf("[P2] Sin mas instrucciones: fantasma %c agotado\n",
+               'A' + ghost_id);
+    }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+}
+
+/*
+    Punto 10.
+    P0 termina cuando P1 y los cuatro fantasmas agotaron sus entradas.
+*/
+int entradas_agotadas(SharedData *shared) {
+    int agotadas = 1;
+
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    if (shared->pacman_moves_finished == 0) {
+        agotadas = 0;
+    }
+
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        if (shared->ghost_moves_finished[i] == 0) {
+            agotadas = 0;
+        }
+    }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    return agotadas;
 }
 
 void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
@@ -708,6 +768,7 @@ void *movement_executor_thread(void *arg) {
             }
         } else {
             printf("[P1-executor] No hay más movimientos de Pac-Man\n");
+            publicar_pacman_agotado(shared);
         }
 
         sem_post(&data->sem_estado_pacman_listo);
@@ -927,6 +988,7 @@ void *ghost_thread_generico(void *arg) {
             printf("[P2-ghost-%d] Fantasma %c no tiene más movimientos\n",
                    id + 1,
                    data->ghosts[id].simbolo);
+            publicar_fantasma_agotado(shared, id);
         }
 
         sem_post(&data->sem_ghost_done[id]);
@@ -1238,7 +1300,7 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     Crea memoria compartida, carga el mapa, crea P1 y P2,
     controla los ticks, decide turnos y espera fin de turno.
 */
-int scheduler_process(const char *carpeta_caso) {
+int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
     printf("Pac-Man concurrente POSIX - Checkpoint 13\n");
     printf("[P0] scheduler_process con mitigación de race conditions\n");
 
@@ -1250,6 +1312,14 @@ int scheduler_process(const char *carpeta_caso) {
     */
     SharedData *shared = crear_memoria_compartida();
     inicializar_shared(shared);
+
+    /*
+        Punto 10: si se recibio un max_ticks valido, reemplaza al valor
+        por defecto fijado en inicializar_shared.
+    */
+    if (max_ticks_arg > 0) {
+        shared->max_ticks = max_ticks_arg;
+    }
 
     /*
         2. Construir ruta del mapa.
@@ -1326,6 +1396,7 @@ int scheduler_process(const char *carpeta_caso) {
     */
     int ultimo_turno = 2;
     int finalizo_por_error = 0;
+    int finalizo_por_agotamiento = 0;
 
     /*
         6. Ciclo principal del scheduler.
@@ -1335,6 +1406,15 @@ int scheduler_process(const char *carpeta_caso) {
 
         if (procesar_error_entrada(shared)) {
             finalizo_por_error = 1;
+            break;
+        }
+
+        /*
+            Punto 10: si P1 y los cuatro fantasmas agotaron sus entradas,
+            P0 finaliza en vez de seguir repartiendo turnos vacios.
+        */
+        if (entradas_agotadas(shared)) {
+            finalizo_por_agotamiento = 1;
             break;
         }
 
@@ -1386,6 +1466,9 @@ int scheduler_process(const char *carpeta_caso) {
     */
     if (finalizo_por_error) {
         printf("\n[P0] Fin por error de entrada\n");
+    } else if (finalizo_por_agotamiento) {
+        printf("\n[P0] Fin por agotamiento de entradas de P1 y P2\n");
+        shared->game_over = 1;
     } else if (shared->pacman_lives <= 0) {
         printf("\n[P0] Fin por vidas agotadas\n");
     } else if (shared->global_tick >= shared->max_ticks) {
@@ -1429,11 +1512,28 @@ int scheduler_process(const char *carpeta_caso) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Uso: %s Caso1\n", argv[0]);
+        printf("Uso: %s Caso1 [max_ticks]\n", argv[0]);
         return 1;
     }
 
-    return scheduler_process(argv[1]);
+    /*
+        Punto 10: max_ticks puede recibirse como segundo argumento.
+        Si no se indica o es invalido, se usa el valor por defecto.
+    */
+    int max_ticks_arg = -1;
+
+    if (argc >= 3) {
+        int valor = atoi(argv[2]);
+
+        if (valor > 0) {
+            max_ticks_arg = valor;
+        } else {
+            printf("[P0] max_ticks invalido '%s'; se usara el valor por defecto\n",
+                   argv[2]);
+        }
+    }
+
+    return scheduler_process(argv[1], max_ticks_arg);
 }
 
 
