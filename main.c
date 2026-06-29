@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -17,6 +18,11 @@
 #define PRIORIDAD_MAX 100
 
 #define P1_QUEUE_SIZE 128
+
+#define LECTURA_FIN 0
+#define LECTURA_OK 1
+#define LECTURA_INVALIDA -1
+#define LECTURA_ERROR -2
 
 /*
     CHECKPOINT 11
@@ -162,6 +168,9 @@ void inicializar_shared(SharedData *shared) {
     shared->pending_priority_enemy = 0;
     shared->enemy_priority_request_active = 0;
 
+    shared->input_error = 0;
+    shared->input_error_process = 0;
+
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
@@ -189,32 +198,96 @@ void construir_ruta(char destino[], int tam, const char *carpeta_caso, const cha
     snprintf(destino, tam, "%s/%s", carpeta_caso, archivo);
 }
 
-int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
-    if (archivo == NULL) {
-        return 0;
-    }
-
-    if (fgets(movimiento, tam, archivo) == NULL) {
-        return 0;
-    }
-
+/*
+    Elimina espacios, tabulaciones, '\n' y '\r' de ambos extremos.
+*/
+void limpiar_espacios_movimiento(char movimiento[]) {
+    int inicio = 0;
     int largo = strlen(movimiento);
 
-    if (largo > 0 && movimiento[largo - 1] == '\n') {
-        movimiento[largo - 1] = '\0';
+    while (movimiento[inicio] != '\0' &&
+           isspace((unsigned char)movimiento[inicio])) {
+        inicio++;
+    }
+
+    while (largo > inicio &&
+           isspace((unsigned char)movimiento[largo - 1])) {
         largo--;
     }
 
-    if (largo > 0 && movimiento[largo - 1] == '\r') {
-        movimiento[largo - 1] = '\0';
-        largo--;
+    int nuevo_largo = largo - inicio;
+
+    if (inicio > 0 && nuevo_largo > 0) {
+        memmove(movimiento, movimiento + inicio, nuevo_largo);
     }
 
-    if (strlen(movimiento) == 0) {
-        return 0;
+    movimiento[nuevo_largo] = '\0';
+}
+
+/*
+    Valida la forma de una instruccion sin ejecutarla.
+    El rango de prioridad sigue siendo responsabilidad de P0.
+*/
+int instruccion_movimiento_valida(const char *movimiento) {
+    if (strcmp(movimiento, "UP") == 0 ||
+        strcmp(movimiento, "DOWN") == 0 ||
+        strcmp(movimiento, "LEFT") == 0 ||
+        strcmp(movimiento, "RIGHT") == 0) {
+        return 1;
     }
 
-    return 1;
+    char comando[32];
+    char sobrante[32];
+    int valor;
+
+    int elementos = sscanf(movimiento,
+                           "%31s %d %31s",
+                           comando,
+                           &valor,
+                           sobrante);
+
+    return elementos == 2 && strcmp(comando, "SET_PRIORITY") == 0;
+}
+
+/*
+    Retorna un estado diferente para instruccion valida, EOF y error.
+    Las lineas vacias se ignoran y no terminan la lectura.
+*/
+int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
+    if (archivo == NULL) {
+        return LECTURA_ERROR;
+    }
+
+    while (fgets(movimiento, tam, archivo) != NULL) {
+        /*
+            Si no entro el salto de linea y aun no llegamos a EOF,
+            la instruccion supera el tamano permitido.
+        */
+        if (strchr(movimiento, '\n') == NULL && !feof(archivo)) {
+            printf("[ERROR] Instruccion demasiado larga\n");
+            return LECTURA_INVALIDA;
+        }
+
+        limpiar_espacios_movimiento(movimiento);
+
+        if (movimiento[0] == '\0') {
+            continue;
+        }
+
+        if (!instruccion_movimiento_valida(movimiento)) {
+            printf("[ERROR] Instruccion de movimiento invalida: %s\n",
+                   movimiento);
+            return LECTURA_INVALIDA;
+        }
+
+        return LECTURA_OK;
+    }
+
+    if (ferror(archivo)) {
+        return LECTURA_ERROR;
+    }
+
+    return LECTURA_FIN;
 }
 
 int extraer_prioridad(const char *movimiento, int *nueva_prioridad) {
@@ -233,6 +306,44 @@ int extraer_prioridad(const char *movimiento, int *nueva_prioridad) {
 
 int prioridad_valida(int prioridad) {
     return prioridad >= PRIORIDAD_MIN && prioridad <= PRIORIDAD_MAX;
+}
+
+void publicar_error_entrada(SharedData *shared, int process_id) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    /*
+        Conservamos el primer error para saber que proceso lo origino.
+    */
+    if (shared->input_error == 0) {
+        shared->input_error = 1;
+        shared->input_error_process = process_id;
+    }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+}
+
+/*
+    Solo P0 convierte el error publicado en una condicion de finalizacion.
+*/
+int procesar_error_entrada(SharedData *shared) {
+    int process_id = 0;
+
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    if (shared->input_error == 1) {
+        process_id = shared->input_error_process;
+        shared->game_over = 1;
+    }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    if (process_id != 0) {
+        printf("[P0] Error de entrada reportado por P%d\n", process_id);
+        printf("[P0] game_over = 1 por archivo o instruccion invalida\n");
+        return 1;
+    }
+
+    return 0;
 }
 
 void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
@@ -500,6 +611,8 @@ void *movement_reader_thread(void *arg) {
     if (archivo_pacman == NULL) {
         printf("[P1-reader] No se pudo abrir %s\n", data->ruta_pacman);
 
+        publicar_error_entrada(data->shared, 1);
+
         pthread_mutex_lock(&data->mutex_cola);
         data->lector_termino = 1;
         pthread_mutex_unlock(&data->mutex_cola);
@@ -511,8 +624,20 @@ void *movement_reader_thread(void *arg) {
 
     char movimiento[MAX_MOVE];
 
-    while (data->terminar == 0 &&
-           leer_movimiento(archivo_pacman, movimiento, sizeof(movimiento))) {
+    while (data->terminar == 0) {
+        int estado_lectura = leer_movimiento(archivo_pacman,
+                                             movimiento,
+                                             sizeof(movimiento));
+
+        if (estado_lectura == LECTURA_FIN) {
+            break;
+        }
+
+        if (estado_lectura == LECTURA_INVALIDA ||
+            estado_lectura == LECTURA_ERROR) {
+            publicar_error_entrada(data->shared, 1);
+            break;
+        }
 
         cola_insertar_movimiento(data, movimiento);
     }
@@ -760,6 +885,8 @@ void *ghost_thread_generico(void *arg) {
         printf("[P2-ghost-%d] No se pudo abrir %s\n",
                id + 1,
                data->rutas_ghost[id]);
+
+        publicar_error_entrada(shared, 2);
     }
 
     printf("[P2-ghost-%d] ghost_thread_%d iniciado\n",
@@ -774,8 +901,11 @@ void *ghost_thread_generico(void *arg) {
         }
 
         char movimiento[MAX_MOVE];
+        int estado_lectura = leer_movimiento(archivo,
+                                             movimiento,
+                                             sizeof(movimiento));
 
-        if (leer_movimiento(archivo, movimiento, sizeof(movimiento))) {
+        if (estado_lectura == LECTURA_OK) {
             int nueva_prioridad;
 
             if (extraer_prioridad(movimiento, &nueva_prioridad)) {
@@ -787,6 +917,12 @@ void *ghost_thread_generico(void *arg) {
 
                 pthread_mutex_unlock(&data->mutex_ghosts);
             }
+        } else if (estado_lectura == LECTURA_INVALIDA ||
+                   estado_lectura == LECTURA_ERROR) {
+            publicar_error_entrada(shared, 2);
+
+            printf("[P2-ghost-%d] Error en archivo de movimientos\n",
+                   id + 1);
         } else {
             printf("[P2-ghost-%d] Fantasma %c no tiene más movimientos\n",
                    id + 1,
@@ -1102,7 +1238,7 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     Crea memoria compartida, carga el mapa, crea P1 y P2,
     controla los ticks, decide turnos y espera fin de turno.
 */
-void scheduler_process(const char *carpeta_caso) {
+int scheduler_process(const char *carpeta_caso) {
     printf("Pac-Man concurrente POSIX - Checkpoint 13\n");
     printf("[P0] scheduler_process con mitigación de race conditions\n");
 
@@ -1129,7 +1265,7 @@ void scheduler_process(const char *carpeta_caso) {
     if (cargar_mapa(ruta_mapa, shared) != 0) {
         printf("[ERROR] No se pudo cargar el mapa\n");
         liberar_memoria_compartida(shared);
-        exit(1);
+        return 1;
     }
 
     imprimir_mapa(shared);
@@ -1157,7 +1293,7 @@ void scheduler_process(const char *carpeta_caso) {
     if (pid_pacman < 0) {
         perror("[P0] Error al crear P1");
         liberar_memoria_compartida(shared);
-        exit(1);
+        return 1;
     }
 
     if (pid_pacman == 0) {
@@ -1172,7 +1308,7 @@ void scheduler_process(const char *carpeta_caso) {
     if (pid_enemy < 0) {
         perror("[P0] Error al crear P2");
         liberar_memoria_compartida(shared);
-        exit(1);
+        return 1;
     }
 
     if (pid_enemy == 0) {
@@ -1189,12 +1325,18 @@ void scheduler_process(const char *carpeta_caso) {
         el primer turno sea P1.
     */
     int ultimo_turno = 2;
+    int finalizo_por_error = 0;
 
     /*
         6. Ciclo principal del scheduler.
     */
     while (shared->game_over == 0 &&
            shared->global_tick < shared->max_ticks) {
+
+        if (procesar_error_entrada(shared)) {
+            finalizo_por_error = 1;
+            break;
+        }
 
         shared->global_tick++;
 
@@ -1226,6 +1368,11 @@ void scheduler_process(const char *carpeta_caso) {
 
         printf("[P0] Fin de turno confirmado\n");
 
+        if (procesar_error_entrada(shared)) {
+            finalizo_por_error = 1;
+            break;
+        }
+
         /*
             P0 procesa colisiones publicadas por P2.
         */
@@ -1237,7 +1384,9 @@ void scheduler_process(const char *carpeta_caso) {
     /*
         7. Revisar causa de finalización.
     */
-    if (shared->pacman_lives <= 0) {
+    if (finalizo_por_error) {
+        printf("\n[P0] Fin por error de entrada\n");
+    } else if (shared->pacman_lives <= 0) {
         printf("\n[P0] Fin por vidas agotadas\n");
     } else if (shared->global_tick >= shared->max_ticks) {
         printf("\n[P0] Se alcanzó max_ticks\n");
@@ -1272,6 +1421,8 @@ void scheduler_process(const char *carpeta_caso) {
 
     printf("[P0] Recursos liberados\n");
     printf("Fin de Checkpoint 13\n");
+
+    return finalizo_por_error ? 1 : 0;
 }
 
 
@@ -1282,9 +1433,7 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    scheduler_process(argv[1]);
-
-    return 0;
+    return scheduler_process(argv[1]);
 }
 
 

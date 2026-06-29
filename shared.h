@@ -40,6 +40,13 @@ typedef struct {
     int pending_priority_enemy;
     int enemy_priority_request_active;
 
+    /*
+        Error al abrir o interpretar un archivo de movimientos.
+        input_error_process usa 1 para P1 y 2 para P2.
+    */
+    int input_error;
+    int input_error_process;
+
     pthread_mutex_t mutex_shared;
 
     /*
