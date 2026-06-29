@@ -4,7 +4,7 @@ LDFLAGS = -pthread
 
 TARGET = pacman_concurrente
 
-SOURCES = main.c map.c pacman.c ghost.c
+SOURCES = main.c map.c pacman.c ghost.c collision.c
 
 all: $(TARGET)
 
@@ -15,5 +15,5 @@ clean:
 	rm -f $(TARGET)
 
 run:
-	./$(TARGET) cases/Caso1
+	./$(TARGET) Caso1
 

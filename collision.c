@@ -1,42 +1,43 @@
+#include <stdio.h>
+
 #include "collision.h"
-#include "map.h"
-#include "utils.h"
+#include "shared.h"
+#include "ghost.h"
 
 /*
-    Verifica si Pac-Man está en la misma posición que algún fantasma.
+    Esta función pertenece a la lógica de P2.
 
-    Retorna:
-    1 si hubo colisión.
-    0 si no hubo colisión.
+    Según el PDF:
+    P2 detecta la colisión y publica el evento.
+    P0 es quien baja vidas y decide game_over.
 */
-int verificar_colision() {
-    int i;
+int verificar_colision(SharedData *shared, GhostState ghosts[]) {
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        if (shared->pacman_y == ghosts[i].y &&
+            shared->pacman_x == ghosts[i].x) {
 
-    for (i = 0; i < 4; i++) {
-        if (ghost_x[i] == -1 || ghost_y[i] == -1) {
-            continue;
-        }
+            printf("\n[COLISIÓN] Pac-Man chocó con fantasma %c\n",
+                   ghosts[i].simbolo);
 
-        if (pacman_x == ghost_x[i] && pacman_y == ghost_y[i]) {
-            escribir_texto("\nCOLISION DETECTADA con Fantasma ");
-            escribir_numero(i + 1);
-            escribir_texto("\n");
+            printf("[COLISIÓN] Evento publicado por P2\n");
+            printf("[COLISIÓN] Tick: %d\n", shared->global_tick);
 
-            pacman_lives--;
-
-            escribir_texto("Vidas restantes: ");
-            escribir_numero(pacman_lives);
-            escribir_texto("\n");
+            shared->collision_detected = 1;
+            shared->collision_tick = shared->global_tick;
+            shared->collision_ghost_id = ghosts[i].id;
 
             return 1;
         }
     }
 
+    shared->collision_detected = 0;
+    shared->collision_tick = -1;
+    shared->collision_ghost_id = -1;
+
     return 0;
 }
 
-void imprimir_vidas() {
-    escribir_texto("Vidas de Pac-Man: ");
-    escribir_numero(pacman_lives);
-    escribir_texto("\n");
+void imprimir_vidas(SharedData *shared) {
+    printf("Vidas de Pac-Man: %d\n", shared->pacman_lives);
 }
+
