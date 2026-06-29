@@ -16,26 +16,54 @@
 #define PRIORIDAD_MIN 1
 #define PRIORIDAD_MAX 100
 
+#define P1_QUEUE_SIZE 128
+
 /*
-    CHECKPOINT 10
+    CHECKPOINT 11
 
     Objetivo:
-    - P0 controla ticks globales.
-    - P0 decide turnos según prioridades.
-    - Si hay empate, P0 aplica Round Robin.
-    - P1 y P2 pueden leer SET_PRIORITY <NUMBER>.
-    - P1 y P2 NO modifican directamente su prioridad.
-    - P1 y P2 dejan una solicitud en memoria compartida.
-    - P0 procesa las solicitudes al inicio del siguiente tick.
-    - Las solicitudes se protegen con mutex_shared.
-    - P2 solo publica colisiones.
-    - P0 procesa colisiones, baja vidas y activa game_over.
+    - Mantener P0 como scheduler.
+    - Mantener P2 como proceso de enemigos.
+    - Convertir P1 en un proceso con hilos internos.
+
+    Hilos de P1:
+    - movement_reader_thread
+    - movement_executor_thread
+    - pacman_publisher_thread
 
     Todavía NO implementamos:
-    - hilos internos de P1
     - hilos internos de P2
     - mutex fuertes para ghost_positions[]
+    - cola avanzada de solicitudes de prioridad
 */
+
+/*
+    Cola interna de movimientos de Pac-Man.
+
+    Esta cola pertenece solo al proceso P1.
+    No está en memoria compartida porque P0 y P2 no necesitan verla.
+*/
+typedef struct {
+    char movimientos[P1_QUEUE_SIZE][MAX_MOVE];
+
+    int frente;
+    int final;
+    int cantidad;
+
+    int lector_termino;
+    int terminar;
+
+    pthread_mutex_t mutex_cola;
+
+    sem_t sem_hay_movimientos;
+    sem_t sem_hay_espacio;
+
+    sem_t sem_estado_pacman_listo;
+
+    SharedData *shared;
+
+    char ruta_pacman[256];
+} PacmanThreadData;
 
 SharedData *crear_memoria_compartida() {
     SharedData *shared = mmap(
@@ -83,34 +111,21 @@ void inicializar_shared(SharedData *shared) {
     shared->collision_tick = -1;
     shared->collision_ghost_id = -1;
 
-    /*
-        Prioridades iniciales.
-        Como empiezan iguales, al inicio se aplica Round Robin.
-    */
     shared->prioridad_pacman = 30;
     shared->prioridad_enemy = 30;
 
-    /*
-        Buzones de solicitud de prioridad.
-    */
     shared->pending_priority_pacman = 0;
     shared->priority_request_active = 0;
 
     shared->pending_priority_enemy = 0;
     shared->enemy_priority_request_active = 0;
 
-    /*
-        Mutex compartido entre procesos.
-    */
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
     pthread_mutex_init(&shared->mutex_shared, &attr);
     pthread_mutexattr_destroy(&attr);
 
-    /*
-        Semáforos compartidos entre procesos.
-    */
     sem_init(&shared->sem_pacman_turn, 1, 0);
     sem_init(&shared->sem_enemy_turn, 1, 0);
     sem_init(&shared->sem_turn_done, 1, 0);
@@ -160,15 +175,6 @@ int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
     return 1;
 }
 
-/*
-    Detecta instrucciones del tipo:
-
-        SET_PRIORITY 80
-
-    Retorna:
-    1 si era SET_PRIORITY.
-    0 si era otro movimiento.
-*/
 int extraer_prioridad(const char *movimiento, int *nueva_prioridad) {
     char comando[32];
     int valor;
@@ -187,11 +193,6 @@ int prioridad_valida(int prioridad) {
     return prioridad >= PRIORIDAD_MIN && prioridad <= PRIORIDAD_MAX;
 }
 
-/*
-    P1 NO cambia directamente shared->prioridad_pacman.
-
-    Solo deja una solicitud para P0.
-*/
 void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -204,11 +205,6 @@ void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
            nueva_prioridad);
 }
 
-/*
-    P2 NO cambia directamente shared->prioridad_enemy.
-
-    Solo deja una solicitud para P0.
-*/
 void solicitar_prioridad_enemy(SharedData *shared, int nueva_prioridad) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -221,11 +217,6 @@ void solicitar_prioridad_enemy(SharedData *shared, int nueva_prioridad) {
            nueva_prioridad);
 }
 
-/*
-    P0 procesa las solicitudes pendientes.
-
-    Se llama al inicio de cada tick, antes de elegir turno.
-*/
 void procesar_solicitudes_prioridad(SharedData *shared) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -237,7 +228,6 @@ void procesar_solicitudes_prioridad(SharedData *shared) {
 
         if (prioridad_valida(nueva)) {
             shared->prioridad_pacman = nueva;
-
             printf("[P0] Prioridad de Pac-Man actualizada oficialmente a %d\n",
                    shared->prioridad_pacman);
         } else {
@@ -256,7 +246,6 @@ void procesar_solicitudes_prioridad(SharedData *shared) {
 
         if (prioridad_valida(nueva)) {
             shared->prioridad_enemy = nueva;
-
             printf("[P0] Prioridad de Enemigos actualizada oficialmente a %d\n",
                    shared->prioridad_enemy);
         } else {
@@ -270,13 +259,6 @@ void procesar_solicitudes_prioridad(SharedData *shared) {
     pthread_mutex_unlock(&shared->mutex_shared);
 }
 
-/*
-    Decide qué proceso recibe turno.
-
-    Retorna:
-    1 -> P1 Pac-Man
-    2 -> P2 Enemigos
-*/
 int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
     printf("[P0] Prioridad Pac-Man=%d | Prioridad Enemigos=%d\n",
            shared->prioridad_pacman,
@@ -294,10 +276,6 @@ int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
         return 2;
     }
 
-    /*
-        Empate de prioridades:
-        aplicamos Round Robin.
-    */
     printf("[P0] Empate de prioridades: aplicando Round Robin\n");
 
     if (*ultimo_turno == 1) {
@@ -309,12 +287,6 @@ int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
     return 1;
 }
 
-/*
-    P0 procesa la colisión publicada por P2.
-
-    P2 no baja vidas.
-    P2 solo publica collision_detected.
-*/
 void procesar_colision_si_existe(SharedData *shared) {
     if (shared->collision_detected == 1) {
         printf("[P0] Evento de colisión recibido\n");
@@ -349,34 +321,172 @@ void imprimir_estado_tick(SharedData *shared) {
 }
 
 /*
-    P1 = pacman_process
+    Funciones de cola interna de P1
 */
-void pacman_process(SharedData *shared, const char *carpeta_caso) {
-    printf("[P1] pacman_process iniciado\n");
-    printf("[P1] PID=%d | PPID=%d\n", getpid(), getppid());
 
-    char ruta_pacman[256];
-    construir_ruta(ruta_pacman, sizeof(ruta_pacman), carpeta_caso, "pacman_moves.txt");
+void inicializar_pacman_thread_data(
+    PacmanThreadData *data,
+    SharedData *shared,
+    const char *ruta_pacman
+) {
+    data->frente = 0;
+    data->final = 0;
+    data->cantidad = 0;
 
-    FILE *archivo_pacman = fopen(ruta_pacman, "r");
+    data->lector_termino = 0;
+    data->terminar = 0;
+
+    data->shared = shared;
+
+    strncpy(data->ruta_pacman, ruta_pacman, sizeof(data->ruta_pacman) - 1);
+    data->ruta_pacman[sizeof(data->ruta_pacman) - 1] = '\0';
+
+    pthread_mutex_init(&data->mutex_cola, NULL);
+
+    sem_init(&data->sem_hay_movimientos, 0, 0);
+    sem_init(&data->sem_hay_espacio, 0, P1_QUEUE_SIZE);
+    sem_init(&data->sem_estado_pacman_listo, 0, 0);
+}
+
+void destruir_pacman_thread_data(PacmanThreadData *data) {
+    pthread_mutex_destroy(&data->mutex_cola);
+
+    sem_destroy(&data->sem_hay_movimientos);
+    sem_destroy(&data->sem_hay_espacio);
+    sem_destroy(&data->sem_estado_pacman_listo);
+}
+
+void cola_insertar_movimiento(PacmanThreadData *data, const char *movimiento) {
+    sem_wait(&data->sem_hay_espacio);
+
+    pthread_mutex_lock(&data->mutex_cola);
+
+    if (data->terminar == 0) {
+        strncpy(data->movimientos[data->final], movimiento, MAX_MOVE - 1);
+        data->movimientos[data->final][MAX_MOVE - 1] = '\0';
+
+        data->final = (data->final + 1) % P1_QUEUE_SIZE;
+        data->cantidad++;
+
+        printf("[P1-reader] Movimiento insertado en cola: %s\n",
+               movimiento);
+    }
+
+    pthread_mutex_unlock(&data->mutex_cola);
+
+    sem_post(&data->sem_hay_movimientos);
+}
+
+int cola_sacar_movimiento(PacmanThreadData *data, char movimiento[]) {
+    while (1) {
+        sem_wait(&data->sem_hay_movimientos);
+
+        pthread_mutex_lock(&data->mutex_cola);
+
+        if (data->cantidad > 0) {
+            strncpy(movimiento, data->movimientos[data->frente], MAX_MOVE - 1);
+            movimiento[MAX_MOVE - 1] = '\0';
+
+            data->frente = (data->frente + 1) % P1_QUEUE_SIZE;
+            data->cantidad--;
+
+            pthread_mutex_unlock(&data->mutex_cola);
+
+            sem_post(&data->sem_hay_espacio);
+
+            return 1;
+        }
+
+        if (data->lector_termino == 1) {
+            pthread_mutex_unlock(&data->mutex_cola);
+
+            /*
+                Dejamos el semáforo disponible para que futuros turnos
+                no se queden bloqueados esperando movimientos inexistentes.
+            */
+            sem_post(&data->sem_hay_movimientos);
+
+            return 0;
+        }
+
+        pthread_mutex_unlock(&data->mutex_cola);
+    }
+}
+
+/*
+    Hilo 1 de P1:
+    movement_reader_thread
+
+    Lee pacman_moves.txt y mete las instrucciones en una cola interna.
+*/
+void *movement_reader_thread(void *arg) {
+    PacmanThreadData *data = (PacmanThreadData *)arg;
+
+    printf("[P1-reader] movement_reader_thread iniciado\n");
+
+    FILE *archivo_pacman = fopen(data->ruta_pacman, "r");
 
     if (archivo_pacman == NULL) {
-        printf("[P1] No se pudo abrir %s\n", ruta_pacman);
+        printf("[P1-reader] No se pudo abrir %s\n", data->ruta_pacman);
+
+        pthread_mutex_lock(&data->mutex_cola);
+        data->lector_termino = 1;
+        pthread_mutex_unlock(&data->mutex_cola);
+
+        sem_post(&data->sem_hay_movimientos);
+
+        return NULL;
     }
+
+    char movimiento[MAX_MOVE];
+
+    while (data->terminar == 0 &&
+           leer_movimiento(archivo_pacman, movimiento, sizeof(movimiento))) {
+
+        cola_insertar_movimiento(data, movimiento);
+    }
+
+    fclose(archivo_pacman);
+
+    pthread_mutex_lock(&data->mutex_cola);
+    data->lector_termino = 1;
+    pthread_mutex_unlock(&data->mutex_cola);
+
+    sem_post(&data->sem_hay_movimientos);
+
+    printf("[P1-reader] movement_reader_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    Hilo 2 de P1:
+    movement_executor_thread
+
+    Espera el turno que P0 le da a P1.
+    Cuando recibe turno, consume una instrucción de la cola.
+*/
+void *movement_executor_thread(void *arg) {
+    PacmanThreadData *data = (PacmanThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P1-executor] movement_executor_thread iniciado\n");
 
     while (1) {
         sem_wait(&shared->sem_pacman_turn);
 
         if (shared->game_over == 1) {
+            data->terminar = 1;
+            sem_post(&data->sem_estado_pacman_listo);
             break;
         }
 
-        printf("[P1] Turno recibido en tick %d\n",
+        printf("[P1-executor] Turno recibido en tick %d\n",
                shared->global_tick);
 
         char movimiento[MAX_MOVE];
 
-        if (leer_movimiento(archivo_pacman, movimiento, sizeof(movimiento))) {
+        if (cola_sacar_movimiento(data, movimiento)) {
             int nueva_prioridad;
 
             if (extraer_prioridad(movimiento, &nueva_prioridad)) {
@@ -385,17 +495,96 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
                 mover_pacman(shared, movimiento);
             }
         } else {
-            printf("[P1] No hay más movimientos de Pac-Man\n");
+            printf("[P1-executor] No hay más movimientos de Pac-Man\n");
         }
+
+        sem_post(&data->sem_estado_pacman_listo);
+    }
+
+    printf("[P1-executor] movement_executor_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    Hilo 3 de P1:
+    pacman_publisher_thread
+
+    Publica el estado de Pac-Man y avisa a P0 que P1 terminó su turno.
+*/
+void *pacman_publisher_thread(void *arg) {
+    PacmanThreadData *data = (PacmanThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P1-publisher] pacman_publisher_thread iniciado\n");
+
+    while (1) {
+        sem_wait(&data->sem_estado_pacman_listo);
+
+        if (data->terminar == 1 || shared->game_over == 1) {
+            break;
+        }
+
+        pthread_mutex_lock(&shared->mutex_shared);
+
+        printf("[P1-publisher] Estado publicado: Pac-Man=(%d,%d), score=%d\n",
+               shared->pacman_y,
+               shared->pacman_x,
+               shared->pacman_score);
+
+        pthread_mutex_unlock(&shared->mutex_shared);
 
         printf("[P1] Fin de turno\n");
 
         sem_post(&shared->sem_turn_done);
     }
 
-    if (archivo_pacman != NULL) {
-        fclose(archivo_pacman);
+    printf("[P1-publisher] pacman_publisher_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    P1 = pacman_process
+
+    Ahora P1 crea 3 hilos internos.
+*/
+void pacman_process(SharedData *shared, const char *carpeta_caso) {
+    printf("[P1] pacman_process iniciado\n");
+    printf("[P1] PID=%d | PPID=%d\n", getpid(), getppid());
+
+    char ruta_pacman[256];
+    construir_ruta(ruta_pacman, sizeof(ruta_pacman), carpeta_caso, "pacman_moves.txt");
+
+    PacmanThreadData data;
+    inicializar_pacman_thread_data(&data, shared, ruta_pacman);
+
+    pthread_t hilo_reader;
+    pthread_t hilo_executor;
+    pthread_t hilo_publisher;
+
+    pthread_create(&hilo_reader, NULL, movement_reader_thread, &data);
+    pthread_create(&hilo_executor, NULL, movement_executor_thread, &data);
+    pthread_create(&hilo_publisher, NULL, pacman_publisher_thread, &data);
+
+    pthread_join(hilo_executor, NULL);
+
+    data.terminar = 1;
+
+    /*
+        Liberamos al reader por si estuviera esperando espacio.
+    */
+    for (int i = 0; i < P1_QUEUE_SIZE; i++) {
+        sem_post(&data.sem_hay_espacio);
     }
+
+    sem_post(&data.sem_hay_movimientos);
+    sem_post(&data.sem_estado_pacman_listo);
+
+    pthread_join(hilo_reader, NULL);
+    pthread_join(hilo_publisher, NULL);
+
+    destruir_pacman_thread_data(&data);
 
     printf("[P1] pacman_process finalizado\n");
     exit(0);
@@ -403,6 +592,9 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
 
 /*
     P2 = enemy_process
+
+    En este checkpoint P2 todavía se mantiene igual.
+    Sus hilos internos vienen en el siguiente checkpoint.
 */
 void enemy_process(SharedData *shared, const char *carpeta_caso) {
     printf("[P2] enemy_process iniciado\n");
@@ -461,11 +653,6 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
             }
         }
 
-        /*
-            P2 solo publica la colisión.
-            No baja vidas.
-            No activa game_over.
-        */
         verificar_colision(shared, ghosts);
 
         printf("[P2] Fin de turno\n");
@@ -487,8 +674,8 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     P0 = scheduler_process
 */
 void scheduler_process(const char *carpeta_caso) {
-    printf("Pac-Man concurrente POSIX - Checkpoint 10\n");
-    printf("[P0] scheduler_process con SET_PRIORITY mediante buzón\n");
+    printf("Pac-Man concurrente POSIX - Checkpoint 11\n");
+    printf("[P0] scheduler_process con P1 multihilo\n");
     printf("[P0] PID=%d\n", getpid());
 
     SharedData *shared = crear_memoria_compartida();
@@ -550,11 +737,6 @@ void scheduler_process(const char *carpeta_caso) {
            pid_pacman,
            pid_enemy);
 
-    /*
-        ultimo_turno sirve para Round Robin.
-        Lo iniciamos en 2 para que, si hay empate,
-        el primer turno sea P1.
-    */
     int ultimo_turno = 2;
 
     while (shared->game_over == 0 &&
@@ -565,9 +747,6 @@ void scheduler_process(const char *carpeta_caso) {
         printf("\n[P0] ==============================\n");
         printf("[P0] Tick global %d\n", shared->global_tick);
 
-        /*
-            P0 procesa las solicitudes SET_PRIORITY al inicio del tick.
-        */
         procesar_solicitudes_prioridad(shared);
 
         int turno = elegir_turno_por_prioridad(shared, &ultimo_turno);
@@ -580,16 +759,10 @@ void scheduler_process(const char *carpeta_caso) {
             sem_post(&shared->sem_enemy_turn);
         }
 
-        /*
-            P0 espera a que el proceso elegido termine su turno.
-        */
         sem_wait(&shared->sem_turn_done);
 
         printf("[P0] Fin de turno confirmado\n");
 
-        /*
-            P0 procesa colisiones después de que P1/P2 terminó su turno.
-        */
         procesar_colision_si_existe(shared);
 
         imprimir_estado_tick(shared);
@@ -605,9 +778,6 @@ void scheduler_process(const char *carpeta_caso) {
     printf("\n[P0] Condición de finalización detectada\n");
     printf("[P0] game_over = %d\n", shared->game_over);
 
-    /*
-        Liberamos a P1 y P2 por si están bloqueados esperando turno.
-    */
     sem_post(&shared->sem_pacman_turn);
     sem_post(&shared->sem_enemy_turn);
 
@@ -623,7 +793,7 @@ void scheduler_process(const char *carpeta_caso) {
     liberar_memoria_compartida(shared);
 
     printf("[P0] Recursos liberados\n");
-    printf("Fin de Checkpoint 10\n");
+    printf("Fin de Checkpoint 11\n");
 }
 
 int main(int argc, char *argv[]) {
