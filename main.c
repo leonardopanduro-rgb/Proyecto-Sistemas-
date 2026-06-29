@@ -330,6 +330,21 @@ int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
 }
 
 void procesar_colision_si_existe(SharedData *shared) {
+    /*
+        CHECKPOINT 13:
+        P0 protege la lectura/escritura del evento de colisión.
+
+        P2 escribe:
+        - collision_detected
+        - collision_tick
+        - collision_ghost_id
+
+        P0 lee esas variables y luego actualiza:
+        - pacman_lives
+        - game_over
+    */
+    pthread_mutex_lock(&shared->mutex_shared);
+
     if (shared->collision_detected == 1) {
         printf("[P0] Evento de colisión recibido\n");
         printf("[P0] collision_tick=%d\n", shared->collision_tick);
@@ -350,9 +365,19 @@ void procesar_colision_si_existe(SharedData *shared) {
         shared->collision_tick = -1;
         shared->collision_ghost_id = -1;
     }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
 }
 
+
+
 void imprimir_estado_tick(SharedData *shared) {
+    /*
+        CHECKPOINT 13:
+        Protegemos la lectura del estado compartido.
+    */
+    pthread_mutex_lock(&shared->mutex_shared);
+
     printf("[P0] Estado después del tick %d:\n", shared->global_tick);
     printf("     Pac-Man=(%d,%d) | vidas=%d | score=%d | game_over=%d\n",
            shared->pacman_y,
@@ -360,7 +385,11 @@ void imprimir_estado_tick(SharedData *shared) {
            shared->pacman_lives,
            shared->pacman_score,
            shared->game_over);
+
+    pthread_mutex_unlock(&shared->mutex_shared);
 }
+
+
 
 /*
     Funciones de cola interna de P1
@@ -508,6 +537,7 @@ void *movement_reader_thread(void *arg) {
     Espera el turno que P0 le da a P1.
     Cuando recibe turno, consume una instrucción de la cola.
 */
+
 void *movement_executor_thread(void *arg) {
     PacmanThreadData *data = (PacmanThreadData *)arg;
     SharedData *shared = data->shared;
@@ -534,7 +564,22 @@ void *movement_executor_thread(void *arg) {
             if (extraer_prioridad(movimiento, &nueva_prioridad)) {
                 solicitar_prioridad_pacman(shared, nueva_prioridad);
             } else {
+                /*
+                    CHECKPOINT 13:
+                    Protegemos la actualización de Pac-Man.
+
+                    mover_pacman modifica:
+                    - shared->pacman_y
+                    - shared->pacman_x
+                    - shared->pacman_score
+
+                    Entonces debe ejecutarse dentro de mutex_shared.
+                */
+                pthread_mutex_lock(&shared->mutex_shared);
+
                 mover_pacman(shared, movimiento);
+
+                pthread_mutex_unlock(&shared->mutex_shared);
             }
         } else {
             printf("[P1-executor] No hay más movimientos de Pac-Man\n");
@@ -547,6 +592,9 @@ void *movement_executor_thread(void *arg) {
 
     return NULL;
 }
+
+
+  
 
 /*
     Hilo 3 de P1:
@@ -1055,8 +1103,10 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     controla los ticks, decide turnos y espera fin de turno.
 */
 void scheduler_process(const char *carpeta_caso) {
-    printf("Pac-Man concurrente POSIX - Checkpoint 12\n");
-    printf("[P0] scheduler_process con P1 y P2 multihilo\n");
+    printf("Pac-Man concurrente POSIX - Checkpoint 13\n");
+    printf("[P0] scheduler_process con mitigación de race conditions\n");
+
+
     printf("[P0] PID=%d\n", getpid());
 
     /*
@@ -1221,7 +1271,7 @@ void scheduler_process(const char *carpeta_caso) {
     liberar_memoria_compartida(shared);
 
     printf("[P0] Recursos liberados\n");
-    printf("Fin de Checkpoint 12\n");
+    printf("Fin de Checkpoint 13\n");
 }
 
 
