@@ -4,6 +4,30 @@
 #include "map.h"
 #include "shared.h"
 
+/*
+    Retorna 1 solamente para los simbolos definidos por el proyecto.
+*/
+static int es_simbolo_mapa_valido(char celda) {
+    return celda == 'X' ||
+           celda == 'O' ||
+           celda == 'P' ||
+           celda == 'A' ||
+           celda == 'B' ||
+           celda == 'C' ||
+           celda == 'D';
+}
+
+/*
+    Convierte A, B, C y D en los indices 0, 1, 2 y 3.
+*/
+static int obtener_indice_fantasma(char celda) {
+    if (celda >= 'A' && celda <= 'D') {
+        return celda - 'A';
+    }
+
+    return -1;
+}
+
 int cargar_mapa(const char *ruta_mapa, SharedData *shared) {
     FILE *archivo = fopen(ruta_mapa, "r");
 
@@ -12,110 +36,154 @@ int cargar_mapa(const char *ruta_mapa, SharedData *shared) {
         return 1;
     }
 
-    char linea[MAX_X + 10];
+    /*
+        El espacio adicional permite detectar una fila que supera MAX_X,
+        incluso si el archivo usa saltos de linea de Windows.
+    */
+    char linea[MAX_X + 3];
+    char mapa_temporal[MAX_Y][MAX_X];
+
     int fila = 0;
-    int columnas_detectadas = 0;
+    int columnas_detectadas = -1;
 
-    int encontro_pacman = 0;
-    int encontro_fantasmas[NUM_GHOSTS] = {0, 0, 0, 0};
+    int pacman_x = -1;
+    int pacman_y = -1;
+    int cantidad_pacman = 0;
 
-    while (fgets(linea, sizeof(linea), archivo) != NULL && fila < MAX_Y) {
+    int ghost_x[NUM_GHOSTS] = {-1, -1, -1, -1};
+    int ghost_y[NUM_GHOSTS] = {-1, -1, -1, -1};
+    int cantidad_fantasmas[NUM_GHOSTS] = {0, 0, 0, 0};
+
+    while (fgets(linea, sizeof(linea), archivo) != NULL) {
         int largo = strlen(linea);
 
         /*
-            Si el archivo viene con salto de línea Linux:
-            "XXXXXXXXXX\n"
-            quitamos el '\n'.
+            Quitamos primero '\n' y luego '\r' para aceptar archivos
+            creados tanto en Linux como en Windows.
         */
         if (largo > 0 && linea[largo - 1] == '\n') {
             linea[largo - 1] = '\0';
             largo--;
         }
 
-        /*
-            Si el archivo viene con salto de línea Windows:
-            "XXXXXXXXXX\r\n"
-            después de quitar '\n' todavía queda '\r'.
-            Por eso también lo quitamos.
-        */
         if (largo > 0 && linea[largo - 1] == '\r') {
             linea[largo - 1] = '\0';
             largo--;
         }
 
-        /*
-            Si la línea quedó vacía, la ignoramos.
-        */
         if (largo == 0) {
-            continue;
+            printf("[ERROR] map.txt contiene una fila vacia\n");
+            fclose(archivo);
+            return 1;
+        }
+
+        if (fila >= MAX_Y) {
+            printf("[ERROR] map.txt supera el maximo de %d filas\n", MAX_Y);
+            fclose(archivo);
+            return 1;
+        }
+
+        if (largo > MAX_X) {
+            printf("[ERROR] La fila %d supera el maximo de %d columnas\n",
+                   fila + 1,
+                   MAX_X);
+            fclose(archivo);
+            return 1;
         }
 
         /*
-            La primera fila válida define la cantidad de columnas.
+            La primera fila define el ancho. Todas las demas deben coincidir.
         */
         if (fila == 0) {
             columnas_detectadas = largo;
+        } else if (largo != columnas_detectadas) {
+            printf("[ERROR] La fila %d tiene %d columnas; se esperaban %d\n",
+                   fila + 1,
+                   largo,
+                   columnas_detectadas);
+            fclose(archivo);
+            return 1;
         }
 
-        for (int columna = 0; columna < largo && columna < MAX_X; columna++) {
+        for (int columna = 0; columna < largo; columna++) {
             char celda = linea[columna];
 
-            /*
-                Guardamos el mapa base como transitable si encontramos
-                P, A, B, C o D, porque sus posiciones ya se guardan aparte.
+            if (!es_simbolo_mapa_valido(celda)) {
+                printf("[ERROR] Simbolo '%c' invalido en fila %d, columna %d\n",
+                       celda,
+                       fila + 1,
+                       columna + 1);
+                fclose(archivo);
+                return 1;
+            }
 
-                Es decir:
-                - P se guarda en shared->pacman_y / shared->pacman_x.
-                - A, B, C, D se guardan en ghost_start_y / ghost_start_x.
-                - En el mapa base se pone 'O' para que esa celda sea caminable.
-            */
             if (celda == 'P') {
-                shared->pacman_y = fila;
-                shared->pacman_x = columna;
-                shared->map_grid[fila][columna] = 'O';
-                encontro_pacman = 1;
-            } else if (celda == 'A') {
-                shared->ghost_start_y[0] = fila;
-                shared->ghost_start_x[0] = columna;
-                shared->map_grid[fila][columna] = 'O';
-                encontro_fantasmas[0] = 1;
-            } else if (celda == 'B') {
-                shared->ghost_start_y[1] = fila;
-                shared->ghost_start_x[1] = columna;
-                shared->map_grid[fila][columna] = 'O';
-                encontro_fantasmas[1] = 1;
-            } else if (celda == 'C') {
-                shared->ghost_start_y[2] = fila;
-                shared->ghost_start_x[2] = columna;
-                shared->map_grid[fila][columna] = 'O';
-                encontro_fantasmas[2] = 1;
-            } else if (celda == 'D') {
-                shared->ghost_start_y[3] = fila;
-                shared->ghost_start_x[3] = columna;
-                shared->map_grid[fila][columna] = 'O';
-                encontro_fantasmas[3] = 1;
+                cantidad_pacman++;
+                pacman_y = fila;
+                pacman_x = columna;
+                mapa_temporal[fila][columna] = 'O';
             } else {
-                shared->map_grid[fila][columna] = celda;
+                int ghost_id = obtener_indice_fantasma(celda);
+
+                if (ghost_id >= 0) {
+                    cantidad_fantasmas[ghost_id]++;
+                    ghost_y[ghost_id] = fila;
+                    ghost_x[ghost_id] = columna;
+                    mapa_temporal[fila][columna] = 'O';
+                } else {
+                    mapa_temporal[fila][columna] = celda;
+                }
             }
         }
 
         fila++;
     }
 
+    if (ferror(archivo)) {
+        perror("Error al leer map.txt");
+        fclose(archivo);
+        return 1;
+    }
+
     fclose(archivo);
 
-    shared->filas = fila;
-    shared->columnas = columnas_detectadas;
+    if (fila == 0 || columnas_detectadas <= 0) {
+        printf("[ERROR] map.txt esta vacio\n");
+        return 1;
+    }
 
-    if (!encontro_pacman) {
-        printf("[ERROR] El mapa no tiene Pac-Man marcado con P\n");
+    if (cantidad_pacman != 1) {
+        printf("[ERROR] Se esperaba exactamente un Pac-Man; se encontraron %d\n",
+               cantidad_pacman);
         return 1;
     }
 
     for (int i = 0; i < NUM_GHOSTS; i++) {
-        if (!encontro_fantasmas[i]) {
-            printf("[ERROR] El mapa no tiene el fantasma %d\n", i + 1);
+        if (cantidad_fantasmas[i] != 1) {
+            printf("[ERROR] Se esperaba exactamente un fantasma %c; se encontraron %d\n",
+                   'A' + i,
+                   cantidad_fantasmas[i]);
             return 1;
+        }
+    }
+
+    /*
+        Solo despues de validar todo el archivo publicamos el mapa y las
+        posiciones en memoria compartida.
+    */
+    shared->filas = fila;
+    shared->columnas = columnas_detectadas;
+    shared->pacman_y = pacman_y;
+    shared->pacman_x = pacman_x;
+
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        shared->ghost_start_y[i] = ghost_y[i];
+        shared->ghost_start_x[i] = ghost_x[i];
+    }
+
+    for (int y = 0; y < fila; y++) {
+        for (int x = 0; x < columnas_detectadas; x++) {
+            shared->map_grid[y][x] = mapa_temporal[y][x];
         }
     }
 
@@ -174,4 +242,3 @@ void imprimir_mapa(SharedData *shared) {
 
     printf("\n");
 }
-
