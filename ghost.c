@@ -1,178 +1,101 @@
-#include <unistd.h>
-#include <sys/syscall.h>
-#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "ghost.h"
 #include "map.h"
-#include "utils.h"
-#include "collision.h"
+#include "shared.h"
 
-#define GHOST_MOVE_SIZE 2048
+void inicializar_fantasmas_desde_shared(SharedData *shared, GhostState ghosts[]) {
+    char simbolos[NUM_GHOSTS] = {'A', 'B', 'C', 'D'};
 
-void limpiar_movimiento_fantasma(char movimiento[]) {
-    int i = 0;
-
-    while (movimiento[i] != '\0') {
-        if (movimiento[i] == ' ') {
-            movimiento[i] = '\0';
-            return;
-        }
-
-        if (movimiento[i] == '\t') {
-            movimiento[i] = '\0';
-            return;
-        }
-
-        i++;
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        ghosts[i].id = i;
+        ghosts[i].simbolo = simbolos[i];
+        ghosts[i].y = shared->ghost_start_y[i];
+        ghosts[i].x = shared->ghost_start_x[i];
     }
 }
 
-void escribir_letra_fantasma(int id_fantasma, int x, int y) {
-    if (id_fantasma == 0) {
-        mapa[y][x] = 'A';
-    } else if (id_fantasma == 1) {
-        mapa[y][x] = 'B';
-    } else if (id_fantasma == 2) {
-        mapa[y][x] = 'C';
-    } else if (id_fantasma == 3) {
-        mapa[y][x] = 'D';
+void imprimir_fantasmas(GhostState ghosts[]) {
+    printf("\nPosiciones actuales de fantasmas:\n");
+
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        printf("Fantasma %c en (%d,%d)\n",
+               ghosts[i].simbolo,
+               ghosts[i].y,
+               ghosts[i].x);
     }
+
+    printf("\n");
 }
 
-void ejecutar_movimiento_fantasma(int id_fantasma, const char movimiento_original[]) {
-    char movimiento[40];
-    int k = 0;
+void mover_fantasma(SharedData *shared, GhostState *ghost, const char *movimiento) {
+    int nuevo_y = ghost->y;
+    int nuevo_x = ghost->x;
 
-    while (movimiento_original[k] != '\0' && k < 39) {
-        movimiento[k] = movimiento_original[k];
-        k++;
-    }
+    printf("[Fantasma %c] Intenta movimiento: %s\n",
+           ghost->simbolo,
+           movimiento);
 
-    movimiento[k] = '\0';
-
-    limpiar_movimiento_fantasma(movimiento);
-
-    int actual_x = ghost_x[id_fantasma];
-    int actual_y = ghost_y[id_fantasma];
-
-    int nuevo_x = actual_x;
-    int nuevo_y = actual_y;
-
-    escribir_texto("\nMovimiento Fantasma ");
-    escribir_numero(id_fantasma + 1);
-    escribir_texto(": ");
-    escribir_texto(movimiento);
-    escribir_texto("\n");
-
-    if (actual_x == -1 || actual_y == -1) {
-        escribir_texto("Error: fantasma no encontrado en el mapa\n");
-        return;
-    }
-
-    if (textos_iguales(movimiento, "UP")) {
+    if (strcmp(movimiento, "UP") == 0) {
         nuevo_y--;
-    } else if (textos_iguales(movimiento, "DOWN")) {
+    } else if (strcmp(movimiento, "DOWN") == 0) {
         nuevo_y++;
-    } else if (textos_iguales(movimiento, "LEFT")) {
+    } else if (strcmp(movimiento, "LEFT") == 0) {
         nuevo_x--;
-    } else if (textos_iguales(movimiento, "RIGHT")) {
+    } else if (strcmp(movimiento, "RIGHT") == 0) {
         nuevo_x++;
+    } else if (strncmp(movimiento, "SET_PRIORITY", 12) == 0) {
+        printf("[Fantasma %c] SET_PRIORITY será implementado en Checkpoint 10\n",
+               ghost->simbolo);
+        return;
     } else {
-        escribir_texto("Movimiento de fantasma no reconocido. Se ignora.\n");
+        printf("[Fantasma %c] Movimiento desconocido: %s\n",
+               ghost->simbolo,
+               movimiento);
         return;
     }
 
-    if (!dentro_del_mapa(nuevo_x, nuevo_y)) {
-        escribir_texto("Movimiento invalido: fuera del mapa\n");
-        return;
+    if (es_celda_valida(shared, nuevo_y, nuevo_x)) {
+        ghost->y = nuevo_y;
+        ghost->x = nuevo_x;
+
+        printf("[Fantasma %c] Movimiento válido\n", ghost->simbolo);
+        printf("[Fantasma %c] Nueva posición: (%d,%d)\n",
+               ghost->simbolo,
+               ghost->y,
+               ghost->x);
+    } else {
+        printf("[Fantasma %c] Movimiento inválido: pared o límite\n",
+               ghost->simbolo);
+        printf("[Fantasma %c] Permanece en (%d,%d)\n",
+               ghost->simbolo,
+               ghost->y,
+               ghost->x);
     }
-
-    if (mapa[nuevo_y][nuevo_x] == 'X') {
-        escribir_texto("Movimiento invalido: hay pared\n");
-        return;
-    }
-
-    mapa[actual_y][actual_x] = 'O';
-
-    ghost_x[id_fantasma] = nuevo_x;
-    ghost_y[id_fantasma] = nuevo_y;
-
-    escribir_letra_fantasma(id_fantasma, nuevo_x, nuevo_y);
-
-    escribir_texto("Movimiento valido. Nueva posicion Fantasma ");
-    escribir_numero(id_fantasma + 1);
-    escribir_texto(": (");
-    escribir_numero(ghost_x[id_fantasma]);
-    escribir_texto(", ");
-    escribir_numero(ghost_y[id_fantasma]);
-    escribir_texto(")\n");
-
-    verificar_colision();
 }
 
-int ejecutar_movimientos_fantasma_desde_archivo(int id_fantasma, const char ruta_moves[]) {
-    char buffer[GHOST_MOVE_SIZE];
-    char movimiento[40];
+int detectar_colision(SharedData *shared, GhostState ghosts[]) {
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        if (shared->pacman_y == ghosts[i].y &&
+            shared->pacman_x == ghosts[i].x) {
 
-    int fd = syscall(SYS_open, ruta_moves, O_RDONLY);
+            shared->collision_detected = 1;
+            shared->collision_tick = shared->global_tick;
+            shared->collision_ghost_id = ghosts[i].id;
 
-    if (fd < 0) {
-        escribir_error("Error: no se pudo abrir archivo de movimientos del fantasma\n");
-        escribir_error("Ruta usada: ");
-        escribir_error(ruta_moves);
-        escribir_error("\n");
-        return 0;
-    }
+            printf("\n[COLISIÓN] Pac-Man chocó con fantasma %c\n",
+                   ghosts[i].simbolo);
+            printf("[COLISIÓN] Tick: %d\n", shared->collision_tick);
 
-    int bytes_leidos = syscall(SYS_read, fd, buffer, GHOST_MOVE_SIZE - 1);
-
-    if (bytes_leidos <= 0) {
-        escribir_error("Error: no se pudo leer archivo de movimientos del fantasma\n");
-        syscall(SYS_close, fd);
-        return 0;
-    }
-
-    syscall(SYS_close, fd);
-
-    int i = 0;
-    int j = 0;
-
-    while (i < bytes_leidos) {
-        char c = buffer[i];
-
-        if (c == '\r') {
-            i++;
-            continue;
+            return 1;
         }
-
-        if (c == '\n') {
-            movimiento[j] = '\0';
-
-            if (j > 0) {
-                ejecutar_movimiento_fantasma(id_fantasma, movimiento);
-                imprimir_mapa();
-                imprimir_posiciones();
-            }
-
-            j = 0;
-            i++;
-            continue;
-        }
-
-        if (j < 39) {
-            movimiento[j] = c;
-            j++;
-        }
-
-        i++;
     }
 
-    if (j > 0) {
-        movimiento[j] = '\0';
-        ejecutar_movimiento_fantasma(id_fantasma, movimiento);
-        imprimir_mapa();
-        imprimir_posiciones();
-    }
+    shared->collision_detected = 0;
+    shared->collision_tick = -1;
+    shared->collision_ghost_id = -1;
 
-    return 1;
+    return 0;
 }
+

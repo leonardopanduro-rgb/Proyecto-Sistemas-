@@ -1,255 +1,177 @@
-#include <unistd.h>
-#include <sys/syscall.h>
-#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "map.h"
-#include "utils.h"
+#include "shared.h"
 
-char mapa[MAX_FILAS][MAX_COLUMNAS];
+int cargar_mapa(const char *ruta_mapa, SharedData *shared) {
+    FILE *archivo = fopen(ruta_mapa, "r");
 
-int filas = 0;
-int columnas = 0;
-
-int pacman_x = -1;
-int pacman_y = -1;
-int pacman_lives = 3;
-
-int ghost_x[4];
-int ghost_y[4];
-
-void inicializar_mapa() {
-    int i;
-    int j;
-
-    filas = 0;
-    columnas = 0;
-
-    pacman_x = -1;
-    pacman_y = -1;
-    pacman_lives = 3;
-
-    for (i = 0; i < MAX_FILAS; i++) {
-        for (j = 0; j < MAX_COLUMNAS; j++) {
-            mapa[i][j] = ' ';
-        }
+    if (archivo == NULL) {
+        perror("Error al abrir map.txt");
+        return 1;
     }
 
-    for (i = 0; i < 4; i++) {
-        ghost_x[i] = -1;
-        ghost_y[i] = -1;
-    }
-}
-
-void revisar_personaje(char c, int fila, int columna) {
-    if (c == 'P') {
-        pacman_x = columna;
-        pacman_y = fila;
-    }
-
-    if (c == 'A') {
-        ghost_x[0] = columna;
-        ghost_y[0] = fila;
-    }
-
-    if (c == 'B') {
-        ghost_x[1] = columna;
-        ghost_y[1] = fila;
-    }
-
-    if (c == 'C') {
-        ghost_x[2] = columna;
-        ghost_y[2] = fila;
-    }
-
-    if (c == 'D') {
-        ghost_x[3] = columna;
-        ghost_y[3] = fila;
-    }
-}
-
-int caracter_valido(char c) {
-    if (c == 'X') return 1;
-    if (c == 'O') return 1;
-    if (c == 'P') return 1;
-    if (c == 'A') return 1;
-    if (c == 'B') return 1;
-    if (c == 'C') return 1;
-    if (c == 'D') return 1;
-
-    return 0;
-}
-
-int cargar_mapa(const char ruta_mapa[]) {
-    char buffer[BUFFER_SIZE];
-
-    int fd = syscall(SYS_open, ruta_mapa, O_RDONLY);
-
-    if (fd < 0) {
-        escribir_error("Error: no se pudo abrir el archivo del mapa\n");
-        escribir_error("Ruta usada: ");
-        escribir_error(ruta_mapa);
-        escribir_error("\n");
-        return 0;
-    }
-
-    int bytes_leidos = syscall(SYS_read, fd, buffer, BUFFER_SIZE - 1);
-
-    if (bytes_leidos <= 0) {
-        escribir_error("Error: no se pudo leer el mapa\n");
-        syscall(SYS_close, fd);
-        return 0;
-    }
-
-    syscall(SYS_close, fd);
-
+    char linea[MAX_X + 10];
     int fila = 0;
-    int columna = 0;
-    int i = 0;
-    int ancho_detectado = -1;
-    int cantidad_pacman = 0;
+    int columnas_detectadas = 0;
 
-    while (i < bytes_leidos) {
-        char c = buffer[i];
+    int encontro_pacman = 0;
+    int encontro_fantasmas[NUM_GHOSTS] = {0, 0, 0, 0};
 
-        if (c == '\r') {
-            i++;
+    while (fgets(linea, sizeof(linea), archivo) != NULL && fila < MAX_Y) {
+        int largo = strlen(linea);
+
+        /*
+            Si el archivo viene con salto de línea Linux:
+            "XXXXXXXXXX\n"
+            quitamos el '\n'.
+        */
+        if (largo > 0 && linea[largo - 1] == '\n') {
+            linea[largo - 1] = '\0';
+            largo--;
+        }
+
+        /*
+            Si el archivo viene con salto de línea Windows:
+            "XXXXXXXXXX\r\n"
+            después de quitar '\n' todavía queda '\r'.
+            Por eso también lo quitamos.
+        */
+        if (largo > 0 && linea[largo - 1] == '\r') {
+            linea[largo - 1] = '\0';
+            largo--;
+        }
+
+        /*
+            Si la línea quedó vacía, la ignoramos.
+        */
+        if (largo == 0) {
             continue;
         }
 
-        if (c == '\n') {
-            if (columna > 0) {
-                if (ancho_detectado == -1) {
-                    ancho_detectado = columna;
-                } else {
-                    if (columna != ancho_detectado) {
-                        escribir_error("Error: las filas del mapa no tienen el mismo tamaño\n");
-                        return 0;
-                    }
-                }
-
-                fila++;
-                columna = 0;
-            }
-
-            i++;
-            continue;
+        /*
+            La primera fila válida define la cantidad de columnas.
+        */
+        if (fila == 0) {
+            columnas_detectadas = largo;
         }
 
-        if (fila >= MAX_FILAS || columna >= MAX_COLUMNAS) {
-            escribir_error("Error: mapa demasiado grande\n");
-            return 0;
-        }
+        for (int columna = 0; columna < largo && columna < MAX_X; columna++) {
+            char celda = linea[columna];
 
-        if (!caracter_valido(c)) {
-            escribir_error("Error: caracter invalido en el mapa: ");
-            syscall(SYS_write, 2, &c, 1);
-            escribir_error("\n");
-            return 0;
-        }
+            /*
+                Guardamos el mapa base como transitable si encontramos
+                P, A, B, C o D, porque sus posiciones ya se guardan aparte.
 
-        mapa[fila][columna] = c;
-
-        if (c == 'P') {
-            cantidad_pacman++;
-        }
-
-        revisar_personaje(c, fila, columna);
-
-        columna++;
-        i++;
-    }
-
-    if (columna > 0) {
-        if (ancho_detectado == -1) {
-            ancho_detectado = columna;
-        } else {
-            if (columna != ancho_detectado) {
-                escribir_error("Error: la ultima fila tiene tamaño diferente\n");
-                return 0;
+                Es decir:
+                - P se guarda en shared->pacman_y / shared->pacman_x.
+                - A, B, C, D se guardan en ghost_start_y / ghost_start_x.
+                - En el mapa base se pone 'O' para que esa celda sea caminable.
+            */
+            if (celda == 'P') {
+                shared->pacman_y = fila;
+                shared->pacman_x = columna;
+                shared->map_grid[fila][columna] = 'O';
+                encontro_pacman = 1;
+            } else if (celda == 'A') {
+                shared->ghost_start_y[0] = fila;
+                shared->ghost_start_x[0] = columna;
+                shared->map_grid[fila][columna] = 'O';
+                encontro_fantasmas[0] = 1;
+            } else if (celda == 'B') {
+                shared->ghost_start_y[1] = fila;
+                shared->ghost_start_x[1] = columna;
+                shared->map_grid[fila][columna] = 'O';
+                encontro_fantasmas[1] = 1;
+            } else if (celda == 'C') {
+                shared->ghost_start_y[2] = fila;
+                shared->ghost_start_x[2] = columna;
+                shared->map_grid[fila][columna] = 'O';
+                encontro_fantasmas[2] = 1;
+            } else if (celda == 'D') {
+                shared->ghost_start_y[3] = fila;
+                shared->ghost_start_x[3] = columna;
+                shared->map_grid[fila][columna] = 'O';
+                encontro_fantasmas[3] = 1;
+            } else {
+                shared->map_grid[fila][columna] = celda;
             }
         }
 
         fila++;
     }
 
-    filas = fila;
-    columnas = ancho_detectado;
+    fclose(archivo);
 
-    if (filas <= 0 || columnas <= 0) {
-        escribir_error("Error: mapa vacio o invalido\n");
-        return 0;
+    shared->filas = fila;
+    shared->columnas = columnas_detectadas;
+
+    if (!encontro_pacman) {
+        printf("[ERROR] El mapa no tiene Pac-Man marcado con P\n");
+        return 1;
     }
 
-    if (cantidad_pacman == 0) {
-        escribir_error("Error: no se encontro Pac-Man en el mapa\n");
-        return 0;
-    }
-
-    if (cantidad_pacman > 1) {
-        escribir_error("Error: hay mas de un Pac-Man en el mapa\n");
-        return 0;
-    }
-
-    return 1;
-}
-
-void imprimir_mapa() {
-    int i;
-    int j;
-
-    escribir_texto("\n=== MAPA ACTUAL ===\n");
-
-    for (i = 0; i < filas; i++) {
-        for (j = 0; j < columnas; j++) {
-            syscall(SYS_write, 1, &mapa[i][j], 1);
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        if (!encontro_fantasmas[i]) {
+            printf("[ERROR] El mapa no tiene el fantasma %d\n", i + 1);
+            return 1;
         }
-
-        escribir_texto("\n");
     }
+
+    printf("Mapa cargado: %d filas x %d columnas\n",
+           shared->filas,
+           shared->columnas);
+
+    printf("Pac-Man inicia en (%d,%d)\n",
+           shared->pacman_y,
+           shared->pacman_x);
+
+    printf("Fantasma A inicia en (%d,%d)\n",
+           shared->ghost_start_y[0],
+           shared->ghost_start_x[0]);
+
+    printf("Fantasma B inicia en (%d,%d)\n",
+           shared->ghost_start_y[1],
+           shared->ghost_start_x[1]);
+
+    printf("Fantasma C inicia en (%d,%d)\n",
+           shared->ghost_start_y[2],
+           shared->ghost_start_x[2]);
+
+    printf("Fantasma D inicia en (%d,%d)\n",
+           shared->ghost_start_y[3],
+           shared->ghost_start_x[3]);
+
+    return 0;
 }
 
-void imprimir_posiciones() {
-    int i;
-
-    escribir_texto("\n=== POSICIONES ACTUALES ===\n");
-
-    escribir_texto("Pac-Man: (");
-    escribir_numero(pacman_x);
-    escribir_texto(", ");
-    escribir_numero(pacman_y);
-    escribir_texto(")\n");
-
-    for (i = 0; i < 4; i++) {
-        escribir_texto("Fantasma ");
-        escribir_numero(i + 1);
-        escribir_texto(": (");
-        escribir_numero(ghost_x[i]);
-        escribir_texto(", ");
-        escribir_numero(ghost_y[i]);
-        escribir_texto(")\n");
-    }
-
-    escribir_texto("Vidas Pac-Man: ");
-    escribir_numero(pacman_lives);
-    escribir_texto("\n");
-}
-
-int dentro_del_mapa(int x, int y) {
-    if (x < 0) {
+int es_celda_valida(SharedData *shared, int y, int x) {
+    if (y < 0 || y >= shared->filas) {
         return 0;
     }
 
-    if (y < 0) {
+    if (x < 0 || x >= shared->columnas) {
         return 0;
     }
 
-    if (x >= columnas) {
-        return 0;
-    }
-
-    if (y >= filas) {
+    if (shared->map_grid[y][x] == 'X') {
         return 0;
     }
 
     return 1;
 }
+
+void imprimir_mapa(SharedData *shared) {
+    printf("\nMapa base cargado en shared->map_grid:\n");
+
+    for (int y = 0; y < shared->filas; y++) {
+        for (int x = 0; x < shared->columnas; x++) {
+            printf("%c", shared->map_grid[y][x]);
+        }
+        printf("\n");
+    }
+
+    printf("\n");
+}
+
