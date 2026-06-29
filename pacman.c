@@ -5,6 +5,7 @@
 #include "pacman.h"
 #include "map.h"
 #include "utils.h"
+#include "collision.h"
 
 #define MOVE_SIZE 2048
 
@@ -42,7 +43,7 @@ void ejecutar_movimiento_pacman(const char movimiento_original[]) {
     int nuevo_x = pacman_x;
     int nuevo_y = pacman_y;
 
-    escribir_texto("\nMovimiento leido: ");
+    escribir_texto("\nMovimiento Pac-Man: ");
     escribir_texto(movimiento);
     escribir_texto("\n");
 
@@ -55,7 +56,7 @@ void ejecutar_movimiento_pacman(const char movimiento_original[]) {
     } else if (textos_iguales(movimiento, "RIGHT")) {
         nuevo_x++;
     } else {
-        escribir_texto("Movimiento no reconocido. Se ignora.\n");
+        escribir_texto("Movimiento de Pac-Man no reconocido. Se ignora.\n");
         return;
     }
 
@@ -81,6 +82,8 @@ void ejecutar_movimiento_pacman(const char movimiento_original[]) {
     escribir_texto(", ");
     escribir_numero(pacman_y);
     escribir_texto(")\n");
+
+    verificar_colision();
 }
 
 int ejecutar_movimientos_desde_archivo(const char ruta_moves[]) {
@@ -124,6 +127,7 @@ int ejecutar_movimientos_desde_archivo(const char ruta_moves[]) {
             if (j > 0) {
                 ejecutar_movimiento_pacman(movimiento);
                 imprimir_mapa();
+                imprimir_posiciones();
             }
 
             j = 0;
@@ -143,6 +147,7 @@ int ejecutar_movimientos_desde_archivo(const char ruta_moves[]) {
         movimiento[j] = '\0';
         ejecutar_movimiento_pacman(movimiento);
         imprimir_mapa();
+        imprimir_posiciones();
     }
 
     return 1;

@@ -12,6 +12,7 @@ extern int columnas;
 
 extern int pacman_x;
 extern int pacman_y;
+extern int pacman_lives;
 
 extern int ghost_x[4];
 extern int ghost_y[4];

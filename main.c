@@ -2,20 +2,21 @@
 #include "map.h"
 #include "pacman.h"
 #include "ghost.h"
+#include "collision.h"
 
 int main(int argc, char *argv[]) {
     char ruta_mapa[RUTA_SIZE];
     char ruta_pacman_moves[RUTA_SIZE];
     char ruta_ghost_1_moves[RUTA_SIZE];
 
-    escribir_texto("=== CHECKPOINT 1, 2 Y 3 ===\n");
-    escribir_texto("Lectura de mapa, movimiento de Pac-Man y movimiento secuencial del Fantasma A\n");
+    escribir_texto("=== CHECKPOINT 1, 2, 3 Y 4 ===\n");
+    escribir_texto("Mapa, Pac-Man, Fantasma A y colisiones secuenciales\n");
 
     if (argc < 2) {
         escribir_error("Uso correcto:\n");
-        escribir_error("./checkpoint3 Caso1\n");
-        escribir_error("./checkpoint3 Caso2\n");
-        escribir_error("./checkpoint3 Caso3\n");
+        escribir_error("./checkpoint4 Caso1\n");
+        escribir_error("./checkpoint4 Caso2\n");
+        escribir_error("./checkpoint4 Caso3\n");
         return 1;
     }
 
@@ -61,6 +62,7 @@ int main(int argc, char *argv[]) {
 
     imprimir_mapa();
     imprimir_posiciones();
+    imprimir_vidas();
 
     escribir_texto("\nCheckpoint 2: ejecutando movimientos de Pac-Man\n");
 
@@ -79,6 +81,9 @@ int main(int argc, char *argv[]) {
     }
 
     escribir_texto("\nCheckpoint 3 OK: Fantasma A se movio usando ghost_1_moves.txt\n");
+
+    escribir_texto("\nCheckpoint 4 OK: deteccion de colisiones secuencial agregada\n");
+    imprimir_vidas();
 
     return 0;
 }

@@ -1,6 +1,3 @@
-
-
-
 #include <unistd.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
@@ -8,13 +5,10 @@
 #include "ghost.h"
 #include "map.h"
 #include "utils.h"
+#include "collision.h"
 
 #define GHOST_MOVE_SIZE 2048
 
-/*
-    Limpia espacios o tabs al final del movimiento.
-    Ejemplo: "DOWN " se convierte en "DOWN".
-*/
 void limpiar_movimiento_fantasma(char movimiento[]) {
     int i = 0;
 
@@ -33,15 +27,18 @@ void limpiar_movimiento_fantasma(char movimiento[]) {
     }
 }
 
-/*
-    Ejecuta un movimiento para un fantasma.
+void escribir_letra_fantasma(int id_fantasma, int x, int y) {
+    if (id_fantasma == 0) {
+        mapa[y][x] = 'A';
+    } else if (id_fantasma == 1) {
+        mapa[y][x] = 'B';
+    } else if (id_fantasma == 2) {
+        mapa[y][x] = 'C';
+    } else if (id_fantasma == 3) {
+        mapa[y][x] = 'D';
+    }
+}
 
-    id_fantasma:
-    0 = Fantasma A
-    1 = Fantasma B
-    2 = Fantasma C
-    3 = Fantasma D
-*/
 void ejecutar_movimiento_fantasma(int id_fantasma, const char movimiento_original[]) {
     char movimiento[40];
     int k = 0;
@@ -95,26 +92,12 @@ void ejecutar_movimiento_fantasma(int id_fantasma, const char movimiento_origina
         return;
     }
 
-    /*
-        La posición anterior del fantasma vuelve a ser camino.
-    */
     mapa[actual_y][actual_x] = 'O';
 
     ghost_x[id_fantasma] = nuevo_x;
     ghost_y[id_fantasma] = nuevo_y;
 
-    /*
-        Dibujar otra vez el fantasma en su nueva posición.
-    */
-    if (id_fantasma == 0) {
-        mapa[nuevo_y][nuevo_x] = 'A';
-    } else if (id_fantasma == 1) {
-        mapa[nuevo_y][nuevo_x] = 'B';
-    } else if (id_fantasma == 2) {
-        mapa[nuevo_y][nuevo_x] = 'C';
-    } else if (id_fantasma == 3) {
-        mapa[nuevo_y][nuevo_x] = 'D';
-    }
+    escribir_letra_fantasma(id_fantasma, nuevo_x, nuevo_y);
 
     escribir_texto("Movimiento valido. Nueva posicion Fantasma ");
     escribir_numero(id_fantasma + 1);
@@ -123,12 +106,10 @@ void ejecutar_movimiento_fantasma(int id_fantasma, const char movimiento_origina
     escribir_texto(", ");
     escribir_numero(ghost_y[id_fantasma]);
     escribir_texto(")\n");
+
+    verificar_colision();
 }
 
-/*
-    Lee el archivo ghost_1_moves.txt y ejecuta sus movimientos.
-    Por ahora se usará para el Fantasma A.
-*/
 int ejecutar_movimientos_fantasma_desde_archivo(int id_fantasma, const char ruta_moves[]) {
     char buffer[GHOST_MOVE_SIZE];
     char movimiento[40];
@@ -170,6 +151,7 @@ int ejecutar_movimientos_fantasma_desde_archivo(int id_fantasma, const char ruta
             if (j > 0) {
                 ejecutar_movimiento_fantasma(id_fantasma, movimiento);
                 imprimir_mapa();
+                imprimir_posiciones();
             }
 
             j = 0;
@@ -185,15 +167,12 @@ int ejecutar_movimientos_fantasma_desde_archivo(int id_fantasma, const char ruta
         i++;
     }
 
-    /*
-        Procesa la última línea si el archivo no termina con salto de línea.
-    */
     if (j > 0) {
         movimiento[j] = '\0';
         ejecutar_movimiento_fantasma(id_fantasma, movimiento);
         imprimir_mapa();
+        imprimir_posiciones();
     }
 
     return 1;
 }
-

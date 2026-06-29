@@ -12,6 +12,7 @@ int columnas = 0;
 
 int pacman_x = -1;
 int pacman_y = -1;
+int pacman_lives = 3;
 
 int ghost_x[4];
 int ghost_y[4];
@@ -25,6 +26,7 @@ void inicializar_mapa() {
 
     pacman_x = -1;
     pacman_y = -1;
+    pacman_lives = 3;
 
     for (i = 0; i < MAX_FILAS; i++) {
         for (j = 0; j < MAX_COLUMNAS; j++) {
@@ -209,7 +211,7 @@ void imprimir_mapa() {
 void imprimir_posiciones() {
     int i;
 
-    escribir_texto("\n=== POSICIONES INICIALES ===\n");
+    escribir_texto("\n=== POSICIONES ACTUALES ===\n");
 
     escribir_texto("Pac-Man: (");
     escribir_numero(pacman_x);
@@ -226,6 +228,10 @@ void imprimir_posiciones() {
         escribir_numero(ghost_y[i]);
         escribir_texto(")\n");
     }
+
+    escribir_texto("Vidas Pac-Man: ");
+    escribir_numero(pacman_lives);
+    escribir_texto("\n");
 }
 
 int dentro_del_mapa(int x, int y) {
