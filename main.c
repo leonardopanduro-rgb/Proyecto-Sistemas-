@@ -13,22 +13,28 @@
 #include "ghost.h"
 #include "collision.h"
 
+#define PRIORIDAD_MIN 1
+#define PRIORIDAD_MAX 100
+
 /*
-    CHECKPOINT 9
+    CHECKPOINT 10
 
     Objetivo:
     - P0 controla ticks globales.
-    - P0 decide el turno según prioridad.
+    - P0 decide turnos según prioridades.
     - Si hay empate, P0 aplica Round Robin.
-    - P1 y P2 siguen esperando semáforos.
-    - P0 sigue esperando sem_turn_done.
+    - P1 y P2 pueden leer SET_PRIORITY <NUMBER>.
+    - P1 y P2 NO modifican directamente su prioridad.
+    - P1 y P2 dejan una solicitud en memoria compartida.
+    - P0 procesa las solicitudes al inicio del siguiente tick.
+    - Las solicitudes se protegen con mutex_shared.
     - P2 solo publica colisiones.
-    - P0 procesa colisiones y baja vidas.
+    - P0 procesa colisiones, baja vidas y activa game_over.
 
     Todavía NO implementamos:
-    - SET_PRIORITY desde archivos
-    - hilos internos
-    - mutex fuertes
+    - hilos internos de P1
+    - hilos internos de P2
+    - mutex fuertes para ghost_positions[]
 */
 
 SharedData *crear_memoria_compartida() {
@@ -78,32 +84,33 @@ void inicializar_shared(SharedData *shared) {
     shared->collision_ghost_id = -1;
 
     /*
-        En Checkpoint 9 usamos estas prioridades para decidir turnos.
-
-        Como ambas empiezan iguales, se debe aplicar Round Robin.
-        Para probar prioridad mayor de Pac-Man puedes poner:
-            prioridad_pacman = 50;
-            prioridad_enemy = 30;
-
-        Para probar prioridad mayor de enemigos:
-            prioridad_pacman = 30;
-            prioridad_enemy = 50;
+        Prioridades iniciales.
+        Como empiezan iguales, al inicio se aplica Round Robin.
     */
     shared->prioridad_pacman = 30;
     shared->prioridad_enemy = 30;
 
+    /*
+        Buzones de solicitud de prioridad.
+    */
     shared->pending_priority_pacman = 0;
     shared->priority_request_active = 0;
 
     shared->pending_priority_enemy = 0;
     shared->enemy_priority_request_active = 0;
 
+    /*
+        Mutex compartido entre procesos.
+    */
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
     pthread_mutex_init(&shared->mutex_shared, &attr);
     pthread_mutexattr_destroy(&attr);
 
+    /*
+        Semáforos compartidos entre procesos.
+    */
     sem_init(&shared->sem_pacman_turn, 1, 0);
     sem_init(&shared->sem_enemy_turn, 1, 0);
     sem_init(&shared->sem_turn_done, 1, 0);
@@ -154,16 +161,121 @@ int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
 }
 
 /*
+    Detecta instrucciones del tipo:
+
+        SET_PRIORITY 80
+
+    Retorna:
+    1 si era SET_PRIORITY.
+    0 si era otro movimiento.
+*/
+int extraer_prioridad(const char *movimiento, int *nueva_prioridad) {
+    char comando[32];
+    int valor;
+
+    if (sscanf(movimiento, "%31s %d", comando, &valor) == 2) {
+        if (strcmp(comando, "SET_PRIORITY") == 0) {
+            *nueva_prioridad = valor;
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+int prioridad_valida(int prioridad) {
+    return prioridad >= PRIORIDAD_MIN && prioridad <= PRIORIDAD_MAX;
+}
+
+/*
+    P1 NO cambia directamente shared->prioridad_pacman.
+
+    Solo deja una solicitud para P0.
+*/
+void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    shared->pending_priority_pacman = nueva_prioridad;
+    shared->priority_request_active = 1;
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    printf("[P1] Solicitud enviada a P0: cambiar prioridad Pac-Man a %d\n",
+           nueva_prioridad);
+}
+
+/*
+    P2 NO cambia directamente shared->prioridad_enemy.
+
+    Solo deja una solicitud para P0.
+*/
+void solicitar_prioridad_enemy(SharedData *shared, int nueva_prioridad) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    shared->pending_priority_enemy = nueva_prioridad;
+    shared->enemy_priority_request_active = 1;
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    printf("[P2] Solicitud enviada a P0: cambiar prioridad Enemigos a %d\n",
+           nueva_prioridad);
+}
+
+/*
+    P0 procesa las solicitudes pendientes.
+
+    Se llama al inicio de cada tick, antes de elegir turno.
+*/
+void procesar_solicitudes_prioridad(SharedData *shared) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    if (shared->priority_request_active == 1) {
+        int nueva = shared->pending_priority_pacman;
+
+        printf("[P0] Solicitud pendiente de P1: prioridad Pac-Man = %d\n",
+               nueva);
+
+        if (prioridad_valida(nueva)) {
+            shared->prioridad_pacman = nueva;
+
+            printf("[P0] Prioridad de Pac-Man actualizada oficialmente a %d\n",
+                   shared->prioridad_pacman);
+        } else {
+            printf("[P0] Solicitud rechazada: prioridad Pac-Man fuera de rango\n");
+        }
+
+        shared->pending_priority_pacman = 0;
+        shared->priority_request_active = 0;
+    }
+
+    if (shared->enemy_priority_request_active == 1) {
+        int nueva = shared->pending_priority_enemy;
+
+        printf("[P0] Solicitud pendiente de P2: prioridad Enemigos = %d\n",
+               nueva);
+
+        if (prioridad_valida(nueva)) {
+            shared->prioridad_enemy = nueva;
+
+            printf("[P0] Prioridad de Enemigos actualizada oficialmente a %d\n",
+                   shared->prioridad_enemy);
+        } else {
+            printf("[P0] Solicitud rechazada: prioridad Enemigos fuera de rango\n");
+        }
+
+        shared->pending_priority_enemy = 0;
+        shared->enemy_priority_request_active = 0;
+    }
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+}
+
+/*
     Decide qué proceso recibe turno.
 
     Retorna:
     1 -> P1 Pac-Man
     2 -> P2 Enemigos
-
-    ultimo_turno:
-    - sirve para Round Robin cuando hay empate.
-    - si el último fue P1, ahora toca P2.
-    - si el último fue P2, ahora toca P1.
 */
 int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
     printf("[P0] Prioridad Pac-Man=%d | Prioridad Enemigos=%d\n",
@@ -186,22 +298,22 @@ int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
         Empate de prioridades:
         aplicamos Round Robin.
     */
-   
-   printf("[P0] Empate de prioridades: aplicando Round Robin\n");
+    printf("[P0] Empate de prioridades: aplicando Round Robin\n");
 
-   if (*ultimo_turno == 1) {
-       *ultimo_turno = 2;
-       return 2;
-   }
+    if (*ultimo_turno == 1) {
+        *ultimo_turno = 2;
+        return 2;
+    }
 
-   *ultimo_turno = 1;
-   return 1;
+    *ultimo_turno = 1;
+    return 1;
 }
-
-
 
 /*
     P0 procesa la colisión publicada por P2.
+
+    P2 no baja vidas.
+    P2 solo publica collision_detected.
 */
 void procesar_colision_si_existe(SharedData *shared) {
     if (shared->collision_detected == 1) {
@@ -265,7 +377,13 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
         char movimiento[MAX_MOVE];
 
         if (leer_movimiento(archivo_pacman, movimiento, sizeof(movimiento))) {
-            mover_pacman(shared, movimiento);
+            int nueva_prioridad;
+
+            if (extraer_prioridad(movimiento, &nueva_prioridad)) {
+                solicitar_prioridad_pacman(shared, nueva_prioridad);
+            } else {
+                mover_pacman(shared, movimiento);
+            }
         } else {
             printf("[P1] No hay más movimientos de Pac-Man\n");
         }
@@ -330,7 +448,13 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
             char movimiento[MAX_MOVE];
 
             if (leer_movimiento(archivos_ghost[i], movimiento, sizeof(movimiento))) {
-                mover_fantasma(shared, &ghosts[i], movimiento);
+                int nueva_prioridad;
+
+                if (extraer_prioridad(movimiento, &nueva_prioridad)) {
+                    solicitar_prioridad_enemy(shared, nueva_prioridad);
+                } else {
+                    mover_fantasma(shared, &ghosts[i], movimiento);
+                }
             } else {
                 printf("[P2] Fantasma %c no tiene más movimientos\n",
                        ghosts[i].simbolo);
@@ -363,8 +487,8 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     P0 = scheduler_process
 */
 void scheduler_process(const char *carpeta_caso) {
-    printf("Pac-Man concurrente POSIX - Checkpoint 9\n");
-    printf("[P0] scheduler_process con prioridades y Round Robin\n");
+    printf("Pac-Man concurrente POSIX - Checkpoint 10\n");
+    printf("[P0] scheduler_process con SET_PRIORITY mediante buzón\n");
     printf("[P0] PID=%d\n", getpid());
 
     SharedData *shared = crear_memoria_compartida();
@@ -428,7 +552,8 @@ void scheduler_process(const char *carpeta_caso) {
 
     /*
         ultimo_turno sirve para Round Robin.
-        Lo iniciamos en 2 para que, si hay empate, el primer turno sea P1.
+        Lo iniciamos en 2 para que, si hay empate,
+        el primer turno sea P1.
     */
     int ultimo_turno = 2;
 
@@ -440,6 +565,11 @@ void scheduler_process(const char *carpeta_caso) {
         printf("\n[P0] ==============================\n");
         printf("[P0] Tick global %d\n", shared->global_tick);
 
+        /*
+            P0 procesa las solicitudes SET_PRIORITY al inicio del tick.
+        */
+        procesar_solicitudes_prioridad(shared);
+
         int turno = elegir_turno_por_prioridad(shared, &ultimo_turno);
 
         if (turno == 1) {
@@ -450,16 +580,24 @@ void scheduler_process(const char *carpeta_caso) {
             sem_post(&shared->sem_enemy_turn);
         }
 
+        /*
+            P0 espera a que el proceso elegido termine su turno.
+        */
         sem_wait(&shared->sem_turn_done);
 
         printf("[P0] Fin de turno confirmado\n");
 
+        /*
+            P0 procesa colisiones después de que P1/P2 terminó su turno.
+        */
         procesar_colision_si_existe(shared);
 
         imprimir_estado_tick(shared);
     }
 
-    if (shared->global_tick >= shared->max_ticks) {
+    if (shared->pacman_lives <= 0) {
+        printf("\n[P0] Fin por vidas agotadas\n");
+    } else if (shared->global_tick >= shared->max_ticks) {
         printf("\n[P0] Se alcanzó max_ticks\n");
         shared->game_over = 1;
     }
@@ -467,6 +605,9 @@ void scheduler_process(const char *carpeta_caso) {
     printf("\n[P0] Condición de finalización detectada\n");
     printf("[P0] game_over = %d\n", shared->game_over);
 
+    /*
+        Liberamos a P1 y P2 por si están bloqueados esperando turno.
+    */
     sem_post(&shared->sem_pacman_turn);
     sem_post(&shared->sem_enemy_turn);
 
@@ -482,7 +623,7 @@ void scheduler_process(const char *carpeta_caso) {
     liberar_memoria_compartida(shared);
 
     printf("[P0] Recursos liberados\n");
-    printf("Fin de Checkpoint 9\n");
+    printf("Fin de Checkpoint 10\n");
 }
 
 int main(int argc, char *argv[]) {
