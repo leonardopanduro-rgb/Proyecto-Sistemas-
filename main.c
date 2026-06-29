@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <pthread.h>
 
@@ -9,6 +10,25 @@
 #include "map.h"
 #include "pacman.h"
 #include "ghost.h"
+
+/*
+    CHECKPOINT 6
+
+    En este checkpoint ya creamos los procesos:
+
+    P0 = scheduler_process = proceso padre
+    P1 = pacman_process    = proceso hijo Pac-Man
+    P2 = enemy_process     = proceso hijo enemigos
+
+    Todavía NO usamos:
+    - semáforos
+    - hilos
+    - scheduler por ticks
+    - prioridades dinámicas
+
+    Solo comprobamos que los procesos se crean bien y que pueden leer
+    la memoria compartida inicializada por P0.
+*/
 
 SharedData *crear_memoria_compartida() {
     SharedData *shared = mmap(
@@ -66,8 +86,8 @@ void inicializar_shared(SharedData *shared) {
     shared->enemy_priority_request_active = 0;
 
     /*
-        Inicialización básica del mutex.
-        Todavía no lo usamos en Checkpoint 5, pero queda listo.
+        Este mutex queda preparado para checkpoints posteriores.
+        En Checkpoint 6 todavía no lo usamos para proteger secciones críticas.
     */
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -88,185 +108,188 @@ void construir_ruta(char destino[], int tam, const char *carpeta_caso, const cha
     snprintf(destino, tam, "%s/%s", carpeta_caso, archivo);
 }
 
-int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
-    if (archivo == NULL) {
-        return 0;
-    }
+/*
+    P1 = pacman_process
 
-    if (fgets(movimiento, tam, archivo) == NULL) {
-        return 0;
-    }
+    Por ahora solo comprueba que puede leer los datos de Pac-Man
+    desde la memoria compartida.
+*/
+void pacman_process(SharedData *shared) {
+    printf("[P1] pacman_process iniciado\n");
+    printf("[P1] PID=%d | PPID=%d\n", getpid(), getppid());
 
-    int largo = strlen(movimiento);
+    printf("[P1] Lee desde memoria compartida:\n");
+    printf("[P1] Posición inicial de Pac-Man: (%d,%d)\n",
+           shared->pacman_y,
+           shared->pacman_x);
 
-    if (largo > 0 && movimiento[largo - 1] == '\n') {
-        movimiento[largo - 1] = '\0';
-        largo--;
-    }
+    printf("[P1] Vidas iniciales de Pac-Man: %d\n",
+           shared->pacman_lives);
 
-    if (largo > 0 && movimiento[largo - 1] == '\r') {
-        movimiento[largo - 1] = '\0';
-    }
+    printf("[P1] Prioridad Pac-Man: %d\n",
+           shared->prioridad_pacman);
 
-    if (strlen(movimiento) == 0) {
-        return 0;
-    }
+    /*
+        sleep pequeño para que puedas observar procesos con ps o pstree
+        si ejecutas comandos rápido en otra terminal.
+    */
+    sleep(1);
 
-    return 1;
+    printf("[P1] pacman_process finalizado\n");
+
+    /*
+        Importante:
+        El hijo debe terminar aquí para no seguir ejecutando código del padre.
+    */
+    exit(0);
 }
 
-void imprimir_estado_shared(SharedData *shared) {
-    printf("\n===== Estado en memoria compartida =====\n");
-    printf("global_tick: %d\n", shared->global_tick);
-    printf("max_ticks: %d\n", shared->max_ticks);
-    printf("game_over: %d\n", shared->game_over);
-    printf("Pac-Man: (%d,%d)\n", shared->pacman_y, shared->pacman_x);
-    printf("Puntaje Pac-Man: %d\n", shared->pacman_score);
-    printf("Vidas Pac-Man: %d\n", shared->pacman_lives);
-    printf("Prioridad Pac-Man: %d\n", shared->prioridad_pacman);
-    printf("Prioridad Enemigos: %d\n", shared->prioridad_enemy);
-    printf("collision_detected: %d\n", shared->collision_detected);
-    printf("collision_tick: %d\n", shared->collision_tick);
-    printf("collision_ghost_id: %d\n", shared->collision_ghost_id);
-    printf("========================================\n\n");
-}
+/*
+    P2 = enemy_process
 
-void ejecutar_simulacion_secuencial_checkpoint5(SharedData *shared, const char *carpeta_caso) {
+    Por ahora solo comprueba que puede leer las posiciones iniciales
+    de los fantasmas desde la memoria compartida.
+*/
+void enemy_process(SharedData *shared) {
+    printf("[P2] enemy_process iniciado\n");
+    printf("[P2] PID=%d | PPID=%d\n", getpid(), getppid());
+
     GhostState ghosts[NUM_GHOSTS];
     inicializar_fantasmas_desde_shared(shared, ghosts);
 
-    char ruta_pacman[256];
-    char ruta_ghost_1[256];
-    char ruta_ghost_2[256];
-    char ruta_ghost_3[256];
-    char ruta_ghost_4[256];
-
-    construir_ruta(ruta_pacman, sizeof(ruta_pacman), carpeta_caso, "pacman_moves.txt");
-    construir_ruta(ruta_ghost_1, sizeof(ruta_ghost_1), carpeta_caso, "ghost_1_moves.txt");
-    construir_ruta(ruta_ghost_2, sizeof(ruta_ghost_2), carpeta_caso, "ghost_2_moves.txt");
-    construir_ruta(ruta_ghost_3, sizeof(ruta_ghost_3), carpeta_caso, "ghost_3_moves.txt");
-    construir_ruta(ruta_ghost_4, sizeof(ruta_ghost_4), carpeta_caso, "ghost_4_moves.txt");
-
-    FILE *archivo_pacman = fopen(ruta_pacman, "r");
-    FILE *archivos_ghost[NUM_GHOSTS];
-
-    archivos_ghost[0] = fopen(ruta_ghost_1, "r");
-    archivos_ghost[1] = fopen(ruta_ghost_2, "r");
-    archivos_ghost[2] = fopen(ruta_ghost_3, "r");
-    archivos_ghost[3] = fopen(ruta_ghost_4, "r");
-
-    if (archivo_pacman == NULL) {
-        printf("[ADVERTENCIA] No se pudo abrir %s\n", ruta_pacman);
-    }
+    printf("[P2] Lee desde memoria compartida:\n");
 
     for (int i = 0; i < NUM_GHOSTS; i++) {
-        if (archivos_ghost[i] == NULL) {
-            printf("[ADVERTENCIA] No se pudo abrir archivo de fantasma %d\n", i + 1);
-        }
+        printf("[P2] Fantasma %c inicia en (%d,%d)\n",
+               ghosts[i].simbolo,
+               ghosts[i].y,
+               ghosts[i].x);
     }
 
-    printf("\n===== Iniciando simulación secuencial Checkpoint 5 =====\n");
-    imprimir_fantasmas(ghosts);
+    printf("[P2] Prioridad Enemigos: %d\n",
+           shared->prioridad_enemy);
 
-    for (int tick = 1; tick <= shared->max_ticks && shared->game_over == 0; tick++) {
-        shared->global_tick = tick;
+    sleep(1);
 
-        printf("\n========== TICK %d ==========\n", shared->global_tick);
+    printf("[P2] enemy_process finalizado\n");
 
-        int hubo_accion = 0;
-        char movimiento[MAX_MOVE];
-
-        if (leer_movimiento(archivo_pacman, movimiento, sizeof(movimiento))) {
-            mover_pacman(shared, movimiento);
-            hubo_accion = 1;
-        } else {
-            printf("[Pac-Man] No hay más movimientos\n");
-        }
-
-        for (int i = 0; i < NUM_GHOSTS; i++) {
-            if (leer_movimiento(archivos_ghost[i], movimiento, sizeof(movimiento))) {
-                mover_fantasma(shared, &ghosts[i], movimiento);
-                hubo_accion = 1;
-            } else {
-                printf("[Fantasma %c] No hay más movimientos\n", ghosts[i].simbolo);
-            }
-        }
-
-        if (detectar_colision(shared, ghosts)) {
-            shared->pacman_lives--;
-
-            printf("[P0 temporal secuencial] Vidas restantes: %d\n",
-                   shared->pacman_lives);
-
-            if (shared->pacman_lives <= 0) {
-                shared->game_over = 1;
-                printf("[P0 temporal secuencial] Pac-Man perdió todas sus vidas\n");
-            }
-        }
-
-        imprimir_estado_shared(shared);
-        imprimir_fantasmas(ghosts);
-
-        if (!hubo_accion) {
-            printf("[P0 temporal secuencial] No quedan movimientos. Fin de simulación.\n");
-            shared->game_over = 1;
-        }
-    }
-
-    if (archivo_pacman != NULL) {
-        fclose(archivo_pacman);
-    }
-
-    for (int i = 0; i < NUM_GHOSTS; i++) {
-        if (archivos_ghost[i] != NULL) {
-            fclose(archivos_ghost[i]);
-        }
-    }
-
-    printf("\n===== Fin simulación secuencial Checkpoint 5 =====\n");
+    /*
+        Importante:
+        El hijo debe terminar aquí para no seguir ejecutando código del padre.
+    */
+    exit(0);
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Uso: %s cases/Caso1\n", argv[0]);
-        return 1;
-    }
+/*
+    P0 = scheduler_process
 
-    printf("Pac-Man concurrente POSIX - Checkpoint 5\n");
-    printf("[P0] Inicializando memoria compartida base\n");
+    En Checkpoint 6, P0:
+    - inicializa memoria compartida
+    - carga mapa
+    - crea P1 con fork()
+    - crea P2 con fork()
+    - espera a P1 y P2 con waitpid()
+    - libera recursos
+
+    Todavía no planifica turnos.
+*/
+void scheduler_process(const char *carpeta_caso) {
+    printf("Pac-Man concurrente POSIX - Checkpoint 6\n");
+    printf("[P0] scheduler_process inicializando arquitectura base\n");
+    printf("[P0] PID=%d\n", getpid());
 
     SharedData *shared = crear_memoria_compartida();
     inicializar_shared(shared);
 
     char ruta_mapa[256];
-    construir_ruta(ruta_mapa, sizeof(ruta_mapa), argv[1], "map.txt");
+    construir_ruta(ruta_mapa, sizeof(ruta_mapa), carpeta_caso, "map.txt");
 
     printf("[P0] Leyendo mapa: %s\n", ruta_mapa);
 
     if (cargar_mapa(ruta_mapa, shared) != 0) {
         printf("[ERROR] No se pudo cargar el mapa\n");
         liberar_memoria_compartida(shared);
-        return 1;
+        exit(1);
     }
 
     imprimir_mapa(shared);
 
-    printf("[P0] Memoria compartida inicializada\n");
+    printf("[P0] Estado compartido base inicializado\n");
     printf("[P0] Pac-Man en shared: (%d,%d)\n",
            shared->pacman_y,
            shared->pacman_x);
 
-    printf("[P0] Vidas iniciales: %d\n", shared->pacman_lives);
+    printf("[P0] Vidas iniciales: %d\n",
+           shared->pacman_lives);
 
     printf("[P0] Prioridades iniciales: Pac-Man=%d, Enemigos=%d\n",
            shared->prioridad_pacman,
            shared->prioridad_enemy);
 
-    ejecutar_simulacion_secuencial_checkpoint5(shared, argv[1]);
+    /*
+        Crear P1 = pacman_process
+    */
+    pid_t pid_pacman = fork();
+
+    if (pid_pacman < 0) {
+        perror("[P0] Error al crear P1 con fork");
+        liberar_memoria_compartida(shared);
+        exit(1);
+    }
+
+    if (pid_pacman == 0) {
+        pacman_process(shared);
+    }
+
+    /*
+        Crear P2 = enemy_process
+
+        OJO:
+        Este fork lo hace P0, no P1.
+        Por eso P1 usa exit(0) dentro de pacman_process.
+    */
+    pid_t pid_enemy = fork();
+
+    if (pid_enemy < 0) {
+        perror("[P0] Error al crear P2 con fork");
+        liberar_memoria_compartida(shared);
+        exit(1);
+    }
+
+    if (pid_enemy == 0) {
+        enemy_process(shared);
+    }
+
+    printf("[P0] Procesos creados:\n");
+    printf("[P0] P1 PID=%d\n", pid_pacman);
+    printf("[P0] P2 PID=%d\n", pid_enemy);
+
+    /*
+        P0 espera a que terminen P1 y P2.
+        Esto evita procesos zombis.
+    */
+    int status_p1;
+    int status_p2;
+
+    waitpid(pid_pacman, &status_p1, 0);
+    printf("[P0] P1 finalizó correctamente\n");
+
+    waitpid(pid_enemy, &status_p2, 0);
+    printf("[P0] P2 finalizó correctamente\n");
 
     liberar_memoria_compartida(shared);
 
-    printf("\nFin de Checkpoint 5\n");
+    printf("[P0] Recursos liberados\n");
+    printf("Fin de Checkpoint 6\n");
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        printf("Uso: %s Caso1\n", argv[0]);
+        return 1;
+    }
+
+    scheduler_process(argv[1]);
 
     return 0;
 }
