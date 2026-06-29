@@ -65,6 +65,48 @@ typedef struct {
     char ruta_pacman[256];
 } PacmanThreadData;
 
+/*
+    Datos internos del proceso P2.
+
+    Esta estructura vive solo dentro de enemy_process.
+    Sirve para coordinar los hilos internos de los fantasmas.
+*/
+typedef struct {
+    SharedData *shared;
+
+    GhostState ghosts[NUM_GHOSTS];
+
+    char rutas_ghost[NUM_GHOSTS][256];
+
+    int pacman_last_y;
+    int pacman_last_x;
+
+    int terminar;
+
+    pthread_mutex_t mutex_ghosts;
+    pthread_mutex_t mutex_pacman_local;
+
+    sem_t sem_ghost_turn[NUM_GHOSTS];
+    sem_t sem_ghost_done[NUM_GHOSTS];
+
+    sem_t sem_tracker_start;
+    sem_t sem_tracker_done;
+
+    sem_t sem_collision_start;
+    sem_t sem_collision_done;
+} EnemyThreadData;
+
+/*
+    Argumento para cada ghost_thread.
+*/
+typedef struct {
+    EnemyThreadData *data;
+    int ghost_index;
+} GhostThreadArg;
+
+
+
+
 SharedData *crear_memoria_compartida() {
     SharedData *shared = mmap(
         NULL,
@@ -591,101 +633,449 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
 }
 
 /*
-    P2 = enemy_process
-
-    En este checkpoint P2 todavía se mantiene igual.
-    Sus hilos internos vienen en el siguiente checkpoint.
+    Inicializa la estructura interna de P2.
 */
-void enemy_process(SharedData *shared, const char *carpeta_caso) {
-    printf("[P2] enemy_process iniciado\n");
-    printf("[P2] PID=%d | PPID=%d\n", getpid(), getppid());
+void inicializar_enemy_thread_data(
+    EnemyThreadData *data,
+    SharedData *shared,
+    const char *carpeta_caso
+) {
+    data->shared = shared;
+    data->terminar = 0;
 
-    GhostState ghosts[NUM_GHOSTS];
-    inicializar_fantasmas_desde_shared(shared, ghosts);
+    inicializar_fantasmas_desde_shared(shared, data->ghosts);
 
-    char ruta_ghost_1[256];
-    char ruta_ghost_2[256];
-    char ruta_ghost_3[256];
-    char ruta_ghost_4[256];
+    construir_ruta(data->rutas_ghost[0], sizeof(data->rutas_ghost[0]),
+                   carpeta_caso, "ghost_1_moves.txt");
 
-    construir_ruta(ruta_ghost_1, sizeof(ruta_ghost_1), carpeta_caso, "ghost_1_moves.txt");
-    construir_ruta(ruta_ghost_2, sizeof(ruta_ghost_2), carpeta_caso, "ghost_2_moves.txt");
-    construir_ruta(ruta_ghost_3, sizeof(ruta_ghost_3), carpeta_caso, "ghost_3_moves.txt");
-    construir_ruta(ruta_ghost_4, sizeof(ruta_ghost_4), carpeta_caso, "ghost_4_moves.txt");
+    construir_ruta(data->rutas_ghost[1], sizeof(data->rutas_ghost[1]),
+                   carpeta_caso, "ghost_2_moves.txt");
 
-    FILE *archivos_ghost[NUM_GHOSTS];
+    construir_ruta(data->rutas_ghost[2], sizeof(data->rutas_ghost[2]),
+                   carpeta_caso, "ghost_3_moves.txt");
 
-    archivos_ghost[0] = fopen(ruta_ghost_1, "r");
-    archivos_ghost[1] = fopen(ruta_ghost_2, "r");
-    archivos_ghost[2] = fopen(ruta_ghost_3, "r");
-    archivos_ghost[3] = fopen(ruta_ghost_4, "r");
+    construir_ruta(data->rutas_ghost[3], sizeof(data->rutas_ghost[3]),
+                   carpeta_caso, "ghost_4_moves.txt");
+
+    data->pacman_last_y = shared->pacman_y;
+    data->pacman_last_x = shared->pacman_x;
+
+    pthread_mutex_init(&data->mutex_ghosts, NULL);
+    pthread_mutex_init(&data->mutex_pacman_local, NULL);
 
     for (int i = 0; i < NUM_GHOSTS; i++) {
-        if (archivos_ghost[i] == NULL) {
-            printf("[P2] No se pudo abrir archivo de fantasma %d\n", i + 1);
-        }
+        sem_init(&data->sem_ghost_turn[i], 0, 0);
+        sem_init(&data->sem_ghost_done[i], 0, 0);
     }
+
+    sem_init(&data->sem_tracker_start, 0, 0);
+    sem_init(&data->sem_tracker_done, 0, 0);
+
+    sem_init(&data->sem_collision_start, 0, 0);
+    sem_init(&data->sem_collision_done, 0, 0);
+}
+
+/*
+    Libera recursos internos de P2.
+*/
+void destruir_enemy_thread_data(EnemyThreadData *data) {
+    pthread_mutex_destroy(&data->mutex_ghosts);
+    pthread_mutex_destroy(&data->mutex_pacman_local);
+
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        sem_destroy(&data->sem_ghost_turn[i]);
+        sem_destroy(&data->sem_ghost_done[i]);
+    }
+
+    sem_destroy(&data->sem_tracker_start);
+    sem_destroy(&data->sem_tracker_done);
+
+    sem_destroy(&data->sem_collision_start);
+    sem_destroy(&data->sem_collision_done);
+}
+
+/*
+    Hilo auxiliar general para fantasmas.
+
+    Los wrappers ghost_thread_1, ghost_thread_2, etc.
+    llaman a esta función.
+*/
+void *ghost_thread_generico(void *arg) {
+    GhostThreadArg *ghost_arg = (GhostThreadArg *)arg;
+    EnemyThreadData *data = ghost_arg->data;
+    SharedData *shared = data->shared;
+    int id = ghost_arg->ghost_index;
+
+    FILE *archivo = fopen(data->rutas_ghost[id], "r");
+
+    if (archivo == NULL) {
+        printf("[P2-ghost-%d] No se pudo abrir %s\n",
+               id + 1,
+               data->rutas_ghost[id]);
+    }
+
+    printf("[P2-ghost-%d] ghost_thread_%d iniciado\n",
+           id + 1,
+           id + 1);
+
+    while (1) {
+        sem_wait(&data->sem_ghost_turn[id]);
+
+        if (data->terminar == 1 || shared->game_over == 1) {
+            break;
+        }
+
+        char movimiento[MAX_MOVE];
+
+        if (leer_movimiento(archivo, movimiento, sizeof(movimiento))) {
+            int nueva_prioridad;
+
+            if (extraer_prioridad(movimiento, &nueva_prioridad)) {
+                solicitar_prioridad_enemy(shared, nueva_prioridad);
+            } else {
+                pthread_mutex_lock(&data->mutex_ghosts);
+
+                mover_fantasma(shared, &data->ghosts[id], movimiento);
+
+                pthread_mutex_unlock(&data->mutex_ghosts);
+            }
+        } else {
+            printf("[P2-ghost-%d] Fantasma %c no tiene más movimientos\n",
+                   id + 1,
+                   data->ghosts[id].simbolo);
+        }
+
+        sem_post(&data->sem_ghost_done[id]);
+    }
+
+    if (archivo != NULL) {
+        fclose(archivo);
+    }
+
+    printf("[P2-ghost-%d] ghost_thread_%d finalizado\n",
+           id + 1,
+           id + 1);
+
+    return NULL;
+}
+
+/*
+    Wrappers con los nombres pedidos por la profesora.
+*/
+void *ghost_thread_1(void *arg) {
+    return ghost_thread_generico(arg);
+}
+
+void *ghost_thread_2(void *arg) {
+    return ghost_thread_generico(arg);
+}
+
+void *ghost_thread_3(void *arg) {
+    return ghost_thread_generico(arg);
+}
+
+void *ghost_thread_4(void *arg) {
+    return ghost_thread_generico(arg);
+}
+
+/*
+    Hilo pacman_tracker_thread.
+
+    Lee la posición actual de Pac-Man desde memoria compartida
+    y guarda una copia local dentro de P2.
+*/
+void *pacman_tracker_thread(void *arg) {
+    EnemyThreadData *data = (EnemyThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P2-tracker] pacman_tracker_thread iniciado\n");
+
+    while (1) {
+        sem_wait(&data->sem_tracker_start);
+
+        if (data->terminar == 1 || shared->game_over == 1) {
+            break;
+        }
+
+        pthread_mutex_lock(&shared->mutex_shared);
+
+        int y = shared->pacman_y;
+        int x = shared->pacman_x;
+
+        pthread_mutex_unlock(&shared->mutex_shared);
+
+        pthread_mutex_lock(&data->mutex_pacman_local);
+
+        data->pacman_last_y = y;
+        data->pacman_last_x = x;
+
+        pthread_mutex_unlock(&data->mutex_pacman_local);
+
+        printf("[P2-tracker] Copia local de Pac-Man: (%d,%d)\n", y, x);
+
+        sem_post(&data->sem_tracker_done);
+    }
+
+    printf("[P2-tracker] pacman_tracker_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    Hilo collision_thread.
+
+    Compara la copia local de Pac-Man con las posiciones internas
+    de los fantasmas.
+*/
+void *collision_thread(void *arg) {
+    EnemyThreadData *data = (EnemyThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P2-collision] collision_thread iniciado\n");
+
+    while (1) {
+        sem_wait(&data->sem_collision_start);
+
+        if (data->terminar == 1 || shared->game_over == 1) {
+            break;
+        }
+
+        pthread_mutex_lock(&data->mutex_pacman_local);
+
+        int pacman_y = data->pacman_last_y;
+        int pacman_x = data->pacman_last_x;
+
+        pthread_mutex_unlock(&data->mutex_pacman_local);
+
+        int colision = 0;
+        int ghost_id = -1;
+        char ghost_simbolo = '?';
+
+        pthread_mutex_lock(&data->mutex_ghosts);
+
+        for (int i = 0; i < NUM_GHOSTS; i++) {
+            if (pacman_y == data->ghosts[i].y &&
+                pacman_x == data->ghosts[i].x) {
+
+                colision = 1;
+                ghost_id = data->ghosts[i].id;
+                ghost_simbolo = data->ghosts[i].simbolo;
+                break;
+            }
+        }
+
+        pthread_mutex_unlock(&data->mutex_ghosts);
+
+        pthread_mutex_lock(&shared->mutex_shared);
+
+        if (colision == 1) {
+            printf("\n[P2-collision] COLISIÓN con fantasma %c\n",
+                   ghost_simbolo);
+
+            shared->collision_detected = 1;
+            shared->collision_tick = shared->global_tick;
+            shared->collision_ghost_id = ghost_id;
+        } else {
+            shared->collision_detected = 0;
+            shared->collision_tick = -1;
+            shared->collision_ghost_id = -1;
+        }
+
+        pthread_mutex_unlock(&shared->mutex_shared);
+
+        sem_post(&data->sem_collision_done);
+    }
+
+    printf("[P2-collision] collision_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    Hilo enemy_controller.
+
+    Este hilo espera el permiso de P0.
+    Cuando P0 le da turno a P2:
+    1. Activa pacman_tracker_thread.
+    2. Activa los 4 ghost_thread.
+    3. Espera a que todos terminen.
+    4. Activa collision_thread.
+    5. Avisa a P0 con sem_turn_done.
+*/
+void *enemy_controller(void *arg) {
+    EnemyThreadData *data = (EnemyThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P2-controller] enemy_controller iniciado\n");
 
     while (1) {
         sem_wait(&shared->sem_enemy_turn);
 
         if (shared->game_over == 1) {
+            data->terminar = 1;
             break;
         }
 
-        printf("[P2] Turno recibido en tick %d\n",
+        printf("[P2-controller] Turno recibido en tick %d\n",
                shared->global_tick);
 
+        /*
+            1. Actualizar copia local de Pac-Man.
+        */
+        sem_post(&data->sem_tracker_start);
+        sem_wait(&data->sem_tracker_done);
+
+        /*
+            2. Despertar a los 4 fantasmas.
+        */
         for (int i = 0; i < NUM_GHOSTS; i++) {
-            char movimiento[MAX_MOVE];
-
-            if (leer_movimiento(archivos_ghost[i], movimiento, sizeof(movimiento))) {
-                int nueva_prioridad;
-
-                if (extraer_prioridad(movimiento, &nueva_prioridad)) {
-                    solicitar_prioridad_enemy(shared, nueva_prioridad);
-                } else {
-                    mover_fantasma(shared, &ghosts[i], movimiento);
-                }
-            } else {
-                printf("[P2] Fantasma %c no tiene más movimientos\n",
-                       ghosts[i].simbolo);
-            }
+            sem_post(&data->sem_ghost_turn[i]);
         }
 
-        verificar_colision(shared, ghosts);
+        /*
+            3. Esperar a que los 4 fantasmas terminen.
+        */
+        for (int i = 0; i < NUM_GHOSTS; i++) {
+            sem_wait(&data->sem_ghost_done[i]);
+        }
 
-        printf("[P2] Fin de turno\n");
+        /*
+            4. Revisar colisión después de que todos se movieron.
+        */
+        sem_post(&data->sem_collision_start);
+        sem_wait(&data->sem_collision_done);
 
+        printf("[P2-controller] Fin de turno\n");
+
+        /*
+            5. Avisar a P0 que P2 terminó.
+        */
         sem_post(&shared->sem_turn_done);
     }
 
+    /*
+        Liberamos todos los hilos que podrían estar bloqueados.
+    */
     for (int i = 0; i < NUM_GHOSTS; i++) {
-        if (archivos_ghost[i] != NULL) {
-            fclose(archivos_ghost[i]);
-        }
+        sem_post(&data->sem_ghost_turn[i]);
     }
+
+    sem_post(&data->sem_tracker_start);
+    sem_post(&data->sem_collision_start);
+
+    printf("[P2-controller] enemy_controller finalizado\n");
+
+    return NULL;
+}
+
+
+
+/*
+    P2 = enemy_process
+
+    En este checkpoint P2 todavía se mantiene igual.
+    Sus hilos internos vienen en el siguiente checkpoint.
+*/
+/*
+    P2 = enemy_process
+
+    Ahora P2 crea hilos internos:
+    - enemy_controller
+    - ghost_thread_1
+    - ghost_thread_2
+    - ghost_thread_3
+    - ghost_thread_4
+    - pacman_tracker_thread
+    - collision_thread
+*/
+void enemy_process(SharedData *shared, const char *carpeta_caso) {
+    printf("[P2] enemy_process iniciado\n");
+    printf("[P2] PID=%d | PPID=%d\n", getpid(), getppid());
+
+    EnemyThreadData data;
+    inicializar_enemy_thread_data(&data, shared, carpeta_caso);
+
+    GhostThreadArg ghost_args[NUM_GHOSTS];
+
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        ghost_args[i].data = &data;
+        ghost_args[i].ghost_index = i;
+    }
+
+    pthread_t hilo_controller;
+    pthread_t hilo_ghost_1;
+    pthread_t hilo_ghost_2;
+    pthread_t hilo_ghost_3;
+    pthread_t hilo_ghost_4;
+    pthread_t hilo_tracker;
+    pthread_t hilo_collision;
+
+    pthread_create(&hilo_controller, NULL, enemy_controller, &data);
+
+    pthread_create(&hilo_ghost_1, NULL, ghost_thread_1, &ghost_args[0]);
+    pthread_create(&hilo_ghost_2, NULL, ghost_thread_2, &ghost_args[1]);
+    pthread_create(&hilo_ghost_3, NULL, ghost_thread_3, &ghost_args[2]);
+    pthread_create(&hilo_ghost_4, NULL, ghost_thread_4, &ghost_args[3]);
+
+    pthread_create(&hilo_tracker, NULL, pacman_tracker_thread, &data);
+    pthread_create(&hilo_collision, NULL, collision_thread, &data);
+
+    pthread_join(hilo_controller, NULL);
+
+    data.terminar = 1;
+
+    /*
+        Liberamos por seguridad los hilos internos.
+    */
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        sem_post(&data.sem_ghost_turn[i]);
+    }
+
+    sem_post(&data.sem_tracker_start);
+    sem_post(&data.sem_collision_start);
+
+    pthread_join(hilo_ghost_1, NULL);
+    pthread_join(hilo_ghost_2, NULL);
+    pthread_join(hilo_ghost_3, NULL);
+    pthread_join(hilo_ghost_4, NULL);
+
+    pthread_join(hilo_tracker, NULL);
+    pthread_join(hilo_collision, NULL);
+
+    destruir_enemy_thread_data(&data);
 
     printf("[P2] enemy_process finalizado\n");
     exit(0);
 }
-
 /*
     P0 = scheduler_process
+
+    Este es el proceso principal.
+    Crea memoria compartida, carga el mapa, crea P1 y P2,
+    controla los ticks, decide turnos y espera fin de turno.
 */
 void scheduler_process(const char *carpeta_caso) {
-    printf("Pac-Man concurrente POSIX - Checkpoint 11\n");
-    printf("[P0] scheduler_process con P1 multihilo\n");
+    printf("Pac-Man concurrente POSIX - Checkpoint 12\n");
+    printf("[P0] scheduler_process con P1 y P2 multihilo\n");
     printf("[P0] PID=%d\n", getpid());
 
+    /*
+        1. Crear e inicializar memoria compartida.
+    */
     SharedData *shared = crear_memoria_compartida();
     inicializar_shared(shared);
 
+    /*
+        2. Construir ruta del mapa.
+    */
     char ruta_mapa[256];
     construir_ruta(ruta_mapa, sizeof(ruta_mapa), carpeta_caso, "map.txt");
 
     printf("[P0] Leyendo mapa: %s\n", ruta_mapa);
 
+    /*
+        3. Cargar mapa en memoria compartida.
+    */
     if (cargar_mapa(ruta_mapa, shared) != 0) {
         printf("[ERROR] No se pudo cargar el mapa\n");
         liberar_memoria_compartida(shared);
@@ -709,6 +1099,9 @@ void scheduler_process(const char *carpeta_caso) {
            shared->prioridad_pacman,
            shared->prioridad_enemy);
 
+    /*
+        4. Crear P1 = pacman_process.
+    */
     pid_t pid_pacman = fork();
 
     if (pid_pacman < 0) {
@@ -721,6 +1114,9 @@ void scheduler_process(const char *carpeta_caso) {
         pacman_process(shared, carpeta_caso);
     }
 
+    /*
+        5. Crear P2 = enemy_process.
+    */
     pid_t pid_enemy = fork();
 
     if (pid_enemy < 0) {
@@ -737,8 +1133,16 @@ void scheduler_process(const char *carpeta_caso) {
            pid_pacman,
            pid_enemy);
 
+    /*
+        ultimo_turno sirve para Round Robin.
+        Lo iniciamos en 2 para que, si hay empate,
+        el primer turno sea P1.
+    */
     int ultimo_turno = 2;
 
+    /*
+        6. Ciclo principal del scheduler.
+    */
     while (shared->game_over == 0 &&
            shared->global_tick < shared->max_ticks) {
 
@@ -747,8 +1151,14 @@ void scheduler_process(const char *carpeta_caso) {
         printf("\n[P0] ==============================\n");
         printf("[P0] Tick global %d\n", shared->global_tick);
 
+        /*
+            P0 procesa solicitudes SET_PRIORITY al inicio del tick.
+        */
         procesar_solicitudes_prioridad(shared);
 
+        /*
+            P0 decide quién recibe turno.
+        */
         int turno = elegir_turno_por_prioridad(shared, &ultimo_turno);
 
         if (turno == 1) {
@@ -759,15 +1169,24 @@ void scheduler_process(const char *carpeta_caso) {
             sem_post(&shared->sem_enemy_turn);
         }
 
+        /*
+            P0 espera a que P1 o P2 termine su turno.
+        */
         sem_wait(&shared->sem_turn_done);
 
         printf("[P0] Fin de turno confirmado\n");
 
+        /*
+            P0 procesa colisiones publicadas por P2.
+        */
         procesar_colision_si_existe(shared);
 
         imprimir_estado_tick(shared);
     }
 
+    /*
+        7. Revisar causa de finalización.
+    */
     if (shared->pacman_lives <= 0) {
         printf("\n[P0] Fin por vidas agotadas\n");
     } else if (shared->global_tick >= shared->max_ticks) {
@@ -778,9 +1197,15 @@ void scheduler_process(const char *carpeta_caso) {
     printf("\n[P0] Condición de finalización detectada\n");
     printf("[P0] game_over = %d\n", shared->game_over);
 
+    /*
+        8. Liberar a P1 y P2 si están bloqueados esperando turno.
+    */
     sem_post(&shared->sem_pacman_turn);
     sem_post(&shared->sem_enemy_turn);
 
+    /*
+        9. Esperar procesos hijos.
+    */
     int status_p1;
     int status_p2;
 
@@ -790,11 +1215,16 @@ void scheduler_process(const char *carpeta_caso) {
     waitpid(pid_enemy, &status_p2, 0);
     printf("[P0] P2 finalizó correctamente\n");
 
+    /*
+        10. Liberar recursos compartidos.
+    */
     liberar_memoria_compartida(shared);
 
     printf("[P0] Recursos liberados\n");
-    printf("Fin de Checkpoint 11\n");
+    printf("Fin de Checkpoint 12\n");
 }
+
+
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -806,4 +1236,5 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
 
