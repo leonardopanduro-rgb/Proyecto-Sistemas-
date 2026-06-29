@@ -2,19 +2,13 @@
 #define SHARED_H
 
 #include <pthread.h>
+#include <semaphore.h>
 
 #define MAX_Y 50
 #define MAX_X 50
 #define NUM_GHOSTS 4
 #define MAX_MOVE 64
 
-/*
-    SharedData representa el estado central del juego.
-
-    En Checkpoint 5 todavía NO usamos procesos ni hilos.
-    Pero ya dejamos todos los datos importantes dentro de esta
-    estructura para que luego P0, P1 y P2 puedan compartirlos.
-*/
 typedef struct {
     int global_tick;
     int max_ticks;
@@ -46,11 +40,23 @@ typedef struct {
     int pending_priority_enemy;
     int enemy_priority_request_active;
 
-    /*
-        Este mutex todavía no se usa fuerte en Checkpoint 5.
-        Lo dejamos preparado para Checkpoint 6 en adelante.
-    */
     pthread_mutex_t mutex_shared;
+
+    /*
+        Semáforos del Checkpoint 7.
+
+        sem_pacman_turn:
+            P0 libera este semáforo cuando quiere que juegue P1.
+
+        sem_enemy_turn:
+            P0 libera este semáforo cuando quiere que juegue P2.
+
+        sem_turn_done:
+            P1 o P2 liberan este semáforo cuando terminaron su turno.
+    */
+    sem_t sem_pacman_turn;
+    sem_t sem_enemy_turn;
+    sem_t sem_turn_done;
 
 } SharedData;
 
