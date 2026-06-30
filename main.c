@@ -1102,7 +1102,7 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     Crea memoria compartida, carga el mapa, crea P1 y P2,
     controla los ticks, decide turnos y espera fin de turno.
 */
-void scheduler_process(const char *carpeta_caso) {
+void scheduler_process(const char *carpeta_caso, int max_ticks) {
     printf("Pac-Man concurrente POSIX - Checkpoint 13\n");
     printf("[P0] scheduler_process con mitigación de race conditions\n");
 
@@ -1114,6 +1114,7 @@ void scheduler_process(const char *carpeta_caso) {
     */
     SharedData *shared = crear_memoria_compartida();
     inicializar_shared(shared);
+    shared->max_ticks = max_ticks;
 
     /*
         2. Construir ruta del mapa.
@@ -1278,11 +1279,39 @@ void scheduler_process(const char *carpeta_caso) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Uso: %s Caso1\n", argv[0]);
+        printf("Uso: %s Caso1 [--max-ticks N]\n", argv[0]);
         return 1;
     }
 
-    scheduler_process(argv[1]);
+    int max_ticks = 10;
+    const char *max_ticks_env = getenv("MAX_TICKS");
+
+    if (max_ticks_env != NULL && max_ticks_env[0] != '\0') {
+        char *fin = NULL;
+        long valor = strtol(max_ticks_env, &fin, 10);
+
+        if (*fin != '\0' || valor <= 0 || valor > 100000000L) {
+            fprintf(stderr, "MAX_TICKS inválido: %s\n", max_ticks_env);
+            return 1;
+        }
+        max_ticks = (int)valor;
+    }
+
+    if (argc == 4 && strcmp(argv[2], "--max-ticks") == 0) {
+        char *fin = NULL;
+        long valor = strtol(argv[3], &fin, 10);
+
+        if (*fin != '\0' || valor <= 0 || valor > 100000000L) {
+            fprintf(stderr, "--max-ticks inválido: %s\n", argv[3]);
+            return 1;
+        }
+        max_ticks = (int)valor;
+    } else if (argc != 2) {
+        fprintf(stderr, "Uso: %s Caso1 [--max-ticks N]\n", argv[0]);
+        return 1;
+    }
+
+    scheduler_process(argv[1], max_ticks);
 
     return 0;
 }

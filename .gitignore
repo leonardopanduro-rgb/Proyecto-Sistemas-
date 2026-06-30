@@ -1,0 +1,7 @@
+
+/build/
+/a
+experiments/__pycache__/
+experiments/results/
+  *.out
+experiments/results/*.err
