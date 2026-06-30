@@ -91,6 +91,7 @@ typedef struct {
 
     pthread_mutex_t mutex_ghosts;
     pthread_mutex_t mutex_pacman_local;
+    pthread_mutex_t mutex_terminar;
 
     sem_t sem_ghost_turn[NUM_GHOSTS];
     sem_t sem_ghost_done[NUM_GHOSTS];
@@ -598,6 +599,27 @@ void destruir_pacman_thread_data(PacmanThreadData *data) {
     sem_destroy(&data->sem_estado_pacman_listo);
 }
 
+/*
+    Punto 13.
+    El acceso a data->terminar se centraliza bajo mutex_cola para que
+    ningun hilo de P1 lea o escriba la bandera directamente.
+*/
+int pacman_debe_terminar(PacmanThreadData *data) {
+    int valor;
+
+    pthread_mutex_lock(&data->mutex_cola);
+    valor = data->terminar;
+    pthread_mutex_unlock(&data->mutex_cola);
+
+    return valor;
+}
+
+void marcar_pacman_terminar(PacmanThreadData *data) {
+    pthread_mutex_lock(&data->mutex_cola);
+    data->terminar = 1;
+    pthread_mutex_unlock(&data->mutex_cola);
+}
+
 void cola_insertar_movimiento(PacmanThreadData *data, const char *movimiento) {
     sem_wait(&data->sem_hay_espacio);
 
@@ -684,7 +706,7 @@ void *movement_reader_thread(void *arg) {
 
     char movimiento[MAX_MOVE];
 
-    while (data->terminar == 0) {
+    while (pacman_debe_terminar(data) == 0) {
         int estado_lectura = leer_movimiento(archivo_pacman,
                                              movimiento,
                                              sizeof(movimiento));
@@ -733,7 +755,7 @@ void *movement_executor_thread(void *arg) {
         sem_wait(&shared->sem_pacman_turn);
 
         if (shared->game_over == 1) {
-            data->terminar = 1;
+            marcar_pacman_terminar(data);
             sem_post(&data->sem_estado_pacman_listo);
             break;
         }
@@ -797,7 +819,7 @@ void *pacman_publisher_thread(void *arg) {
     while (1) {
         sem_wait(&data->sem_estado_pacman_listo);
 
-        if (data->terminar == 1 || shared->game_over == 1) {
+        if (pacman_debe_terminar(data) || shared->game_over == 1) {
             break;
         }
 
@@ -845,7 +867,7 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
 
     pthread_join(hilo_executor, NULL);
 
-    data.terminar = 1;
+    marcar_pacman_terminar(&data);
 
     /*
         Liberamos al reader por si estuviera esperando espacio.
@@ -896,6 +918,7 @@ void inicializar_enemy_thread_data(
 
     pthread_mutex_init(&data->mutex_ghosts, NULL);
     pthread_mutex_init(&data->mutex_pacman_local, NULL);
+    pthread_mutex_init(&data->mutex_terminar, NULL);
 
     for (int i = 0; i < NUM_GHOSTS; i++) {
         sem_init(&data->sem_ghost_turn[i], 0, 0);
@@ -912,9 +935,30 @@ void inicializar_enemy_thread_data(
 /*
     Libera recursos internos de P2.
 */
+/*
+    Punto 13.
+    El acceso a data->terminar de P2 se centraliza bajo mutex_terminar.
+*/
+int enemy_debe_terminar(EnemyThreadData *data) {
+    int valor;
+
+    pthread_mutex_lock(&data->mutex_terminar);
+    valor = data->terminar;
+    pthread_mutex_unlock(&data->mutex_terminar);
+
+    return valor;
+}
+
+void marcar_enemy_terminar(EnemyThreadData *data) {
+    pthread_mutex_lock(&data->mutex_terminar);
+    data->terminar = 1;
+    pthread_mutex_unlock(&data->mutex_terminar);
+}
+
 void destruir_enemy_thread_data(EnemyThreadData *data) {
     pthread_mutex_destroy(&data->mutex_ghosts);
     pthread_mutex_destroy(&data->mutex_pacman_local);
+    pthread_mutex_destroy(&data->mutex_terminar);
 
     for (int i = 0; i < NUM_GHOSTS; i++) {
         sem_destroy(&data->sem_ghost_turn[i]);
@@ -957,7 +1001,7 @@ void *ghost_thread_generico(void *arg) {
     while (1) {
         sem_wait(&data->sem_ghost_turn[id]);
 
-        if (data->terminar == 1 || shared->game_over == 1) {
+        if (enemy_debe_terminar(data) || shared->game_over == 1) {
             break;
         }
 
@@ -1039,7 +1083,7 @@ void *pacman_tracker_thread(void *arg) {
     while (1) {
         sem_wait(&data->sem_tracker_start);
 
-        if (data->terminar == 1 || shared->game_over == 1) {
+        if (enemy_debe_terminar(data) || shared->game_over == 1) {
             break;
         }
 
@@ -1082,7 +1126,7 @@ void *collision_thread(void *arg) {
     while (1) {
         sem_wait(&data->sem_collision_start);
 
-        if (data->terminar == 1 || shared->game_over == 1) {
+        if (enemy_debe_terminar(data) || shared->game_over == 1) {
             break;
         }
 
@@ -1158,7 +1202,7 @@ void *enemy_controller(void *arg) {
         sem_wait(&shared->sem_enemy_turn);
 
         if (shared->game_over == 1) {
-            data->terminar = 1;
+            marcar_enemy_terminar(data);
             break;
         }
 
@@ -1268,7 +1312,7 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
 
     pthread_join(hilo_controller, NULL);
 
-    data.terminar = 1;
+    marcar_enemy_terminar(&data);
 
     /*
         Liberamos por seguridad los hilos internos.
