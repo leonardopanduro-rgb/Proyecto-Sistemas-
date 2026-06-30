@@ -87,6 +87,16 @@ typedef struct {
     int pacman_last_y;
     int pacman_last_x;
 
+    /*
+        Punto 2 (colisiones completas).
+        Guardamos las posiciones anteriores para detectar el cruce
+        (intercambio de posiciones) entre Pac-Man y un fantasma.
+    */
+    int pacman_previous_y;
+    int pacman_previous_x;
+    int ghost_previous_y[NUM_GHOSTS];
+    int ghost_previous_x[NUM_GHOSTS];
+
     int terminar;
 
     pthread_mutex_t mutex_ghosts;
@@ -916,6 +926,14 @@ void inicializar_enemy_thread_data(
     data->pacman_last_y = shared->pacman_y;
     data->pacman_last_x = shared->pacman_x;
 
+    data->pacman_previous_y = shared->pacman_y;
+    data->pacman_previous_x = shared->pacman_x;
+
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        data->ghost_previous_y[i] = data->ghosts[i].y;
+        data->ghost_previous_x[i] = data->ghosts[i].x;
+    }
+
     pthread_mutex_init(&data->mutex_ghosts, NULL);
     pthread_mutex_init(&data->mutex_pacman_local, NULL);
     pthread_mutex_init(&data->mutex_terminar, NULL);
@@ -1096,6 +1114,13 @@ void *pacman_tracker_thread(void *arg) {
 
         pthread_mutex_lock(&data->mutex_pacman_local);
 
+        /*
+            Antes de sobrescribir, conservamos la posición anterior para
+            poder detectar el cruce con un fantasma.
+        */
+        data->pacman_previous_y = data->pacman_last_y;
+        data->pacman_previous_x = data->pacman_last_x;
+
         data->pacman_last_y = y;
         data->pacman_last_x = x;
 
@@ -1134,20 +1159,51 @@ void *collision_thread(void *arg) {
 
         int pacman_y = data->pacman_last_y;
         int pacman_x = data->pacman_last_x;
+        int pacman_prev_y = data->pacman_previous_y;
+        int pacman_prev_x = data->pacman_previous_x;
 
         pthread_mutex_unlock(&data->mutex_pacman_local);
 
         int colision = 0;
         int ghost_id = -1;
         char ghost_simbolo = '?';
+        const char *motivo = "";
 
         pthread_mutex_lock(&data->mutex_ghosts);
 
         for (int i = 0; i < NUM_GHOSTS; i++) {
-            if (pacman_y == data->ghosts[i].y &&
-                pacman_x == data->ghosts[i].x) {
+            int gy = data->ghosts[i].y;
+            int gx = data->ghosts[i].x;
+            int gpy = data->ghost_previous_y[i];
+            int gpx = data->ghost_previous_x[i];
 
+            /*
+                Cruce: Pac-Man y el fantasma intercambian posiciones.
+                Pac-Man actual == posición anterior del fantasma y
+                Pac-Man anterior == posición actual del fantasma.
+            */
+            if (pacman_y == gpy && pacman_x == gpx &&
+                pacman_prev_y == gy && pacman_prev_x == gx) {
                 colision = 1;
+                motivo = "cruce";
+            }
+            /*
+                Choque: el fantasma terminó en la celda de Pac-Man.
+            */
+            else if (pacman_y == gy && pacman_x == gx) {
+                colision = 1;
+                motivo = "choque";
+            }
+            /*
+                Celda ocupada: Pac-Man entró a la celda donde estaba el
+                fantasma antes de moverse, aunque luego se haya alejado.
+            */
+            else if (pacman_y == gpy && pacman_x == gpx) {
+                colision = 1;
+                motivo = "celda ocupada";
+            }
+
+            if (colision == 1) {
                 ghost_id = data->ghosts[i].id;
                 ghost_simbolo = data->ghosts[i].simbolo;
                 break;
@@ -1159,7 +1215,8 @@ void *collision_thread(void *arg) {
         pthread_mutex_lock(&shared->mutex_shared);
 
         if (colision == 1) {
-            printf("\n[P2-collision] COLISIÓN con fantasma %c\n",
+            printf("\n[P2-collision] COLISIÓN (%s) con fantasma %c\n",
+                   motivo,
                    ghost_simbolo);
 
             shared->collision_detected = 1;
@@ -1210,27 +1267,38 @@ void *enemy_controller(void *arg) {
                shared->global_tick);
 
         /*
-            1. Actualizar copia local de Pac-Man.
+            1. Actualizar copia local de Pac-Man (posición actual y anterior).
         */
         sem_post(&data->sem_tracker_start);
         sem_wait(&data->sem_tracker_done);
 
         /*
-            2. Despertar a los 4 fantasmas.
+            2. Guardar la posición anterior de cada fantasma antes de moverlo.
+               El collision_thread la usará para detectar el cruce.
+        */
+        pthread_mutex_lock(&data->mutex_ghosts);
+        for (int i = 0; i < NUM_GHOSTS; i++) {
+            data->ghost_previous_y[i] = data->ghosts[i].y;
+            data->ghost_previous_x[i] = data->ghosts[i].x;
+        }
+        pthread_mutex_unlock(&data->mutex_ghosts);
+
+        /*
+            3. Despertar a los 4 fantasmas.
         */
         for (int i = 0; i < NUM_GHOSTS; i++) {
             sem_post(&data->sem_ghost_turn[i]);
         }
 
         /*
-            3. Esperar a que los 4 fantasmas terminen.
+            4. Esperar a que los 4 fantasmas terminen.
         */
         for (int i = 0; i < NUM_GHOSTS; i++) {
             sem_wait(&data->sem_ghost_done[i]);
         }
 
         /*
-            4. Revisar colisión después de que todos se movieron.
+            5. Revisar choque y cruce después de que todos se movieron.
         */
         sem_post(&data->sem_collision_start);
         sem_wait(&data->sem_collision_done);
@@ -1238,7 +1306,7 @@ void *enemy_controller(void *arg) {
         printf("[P2-controller] Fin de turno\n");
 
         /*
-            5. Avisar a P0 que P2 terminó.
+            6. Avisar a P0 que P2 terminó.
         */
         sem_post(&shared->sem_turn_done);
     }
@@ -1337,6 +1405,183 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
     printf("[P2] enemy_process finalizado\n");
     exit(0);
 }
+/*
+    Punto 2 (Parte B).
+
+    Estructura local de P0 para coordinar sus tres hilos internos.
+    La coordinacion es secuencial mediante semaforos, sin busy waiting:
+
+        P0-main -> tick_thread -> scheduler_thread -> signal_thread -> P1/P2
+*/
+typedef struct {
+    SharedData *shared;
+
+    int turno_actual;   /* 1 = P1, 2 = P2 */
+    int ultimo_turno;   /* para Round Robin en caso de empate */
+    int terminar;
+
+    pthread_mutex_t mutex_scheduler;
+
+    sem_t sem_tick_start;     /* P0-main        -> tick_thread      */
+    sem_t sem_tick_ready;     /* tick_thread    -> scheduler_thread */
+    sem_t sem_turn_ready;     /* scheduler_thread -> signal_thread  */
+    sem_t sem_tick_finished;  /* signal_thread  -> P0-main          */
+} SchedulerThreadData;
+
+void inicializar_scheduler_thread_data(SchedulerThreadData *data, SharedData *shared) {
+    data->shared = shared;
+    data->turno_actual = 0;
+
+    /*
+        ultimo_turno inicia en 2 para que el primer empate dé el turno a P1.
+    */
+    data->ultimo_turno = 2;
+    data->terminar = 0;
+
+    pthread_mutex_init(&data->mutex_scheduler, NULL);
+
+    sem_init(&data->sem_tick_start, 0, 0);
+    sem_init(&data->sem_tick_ready, 0, 0);
+    sem_init(&data->sem_turn_ready, 0, 0);
+    sem_init(&data->sem_tick_finished, 0, 0);
+}
+
+void destruir_scheduler_thread_data(SchedulerThreadData *data) {
+    pthread_mutex_destroy(&data->mutex_scheduler);
+
+    sem_destroy(&data->sem_tick_start);
+    sem_destroy(&data->sem_tick_ready);
+    sem_destroy(&data->sem_turn_ready);
+    sem_destroy(&data->sem_tick_finished);
+}
+
+/*
+    Punto 13 aplicado tambien a P0: terminar se accede solo con mutex.
+*/
+int scheduler_debe_terminar(SchedulerThreadData *data) {
+    int valor;
+
+    pthread_mutex_lock(&data->mutex_scheduler);
+    valor = data->terminar;
+    pthread_mutex_unlock(&data->mutex_scheduler);
+
+    return valor;
+}
+
+void marcar_scheduler_terminar(SchedulerThreadData *data) {
+    pthread_mutex_lock(&data->mutex_scheduler);
+    data->terminar = 1;
+    pthread_mutex_unlock(&data->mutex_scheduler);
+}
+
+/*
+    tick_thread:
+    espera sem_tick_start, incrementa global_tick y publica sem_tick_ready.
+*/
+void *tick_thread(void *arg) {
+    SchedulerThreadData *data = (SchedulerThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P0-tick] tick_thread iniciado\n");
+
+    while (1) {
+        sem_wait(&data->sem_tick_start);
+
+        if (scheduler_debe_terminar(data)) {
+            break;
+        }
+
+        pthread_mutex_lock(&shared->mutex_shared);
+        shared->global_tick++;
+        int tick_actual = shared->global_tick;
+        pthread_mutex_unlock(&shared->mutex_shared);
+
+        printf("\n[P0] ==============================\n");
+        printf("[P0] Tick global %d\n", tick_actual);
+
+        sem_post(&data->sem_tick_ready);
+    }
+
+    printf("[P0-tick] tick_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    scheduler_thread:
+    procesa solicitudes de prioridad, compara prioridades y escribe
+    turno_actual.
+*/
+void *scheduler_thread(void *arg) {
+    SchedulerThreadData *data = (SchedulerThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P0-scheduler] scheduler_thread iniciado\n");
+
+    while (1) {
+        sem_wait(&data->sem_tick_ready);
+
+        if (scheduler_debe_terminar(data)) {
+            break;
+        }
+
+        procesar_solicitudes_prioridad(shared);
+
+        pthread_mutex_lock(&data->mutex_scheduler);
+        data->turno_actual =
+            elegir_turno_por_prioridad(shared, &data->ultimo_turno);
+        pthread_mutex_unlock(&data->mutex_scheduler);
+
+        sem_post(&data->sem_turn_ready);
+    }
+
+    printf("[P0-scheduler] scheduler_thread finalizado\n");
+
+    return NULL;
+}
+
+/*
+    signal_thread:
+    libera el semaforo del proceso elegido, espera sem_turn_done y confirma
+    el final del tick con sem_tick_finished.
+*/
+void *signal_thread(void *arg) {
+    SchedulerThreadData *data = (SchedulerThreadData *)arg;
+    SharedData *shared = data->shared;
+
+    printf("[P0-signal] signal_thread iniciado\n");
+
+    while (1) {
+        sem_wait(&data->sem_turn_ready);
+
+        if (scheduler_debe_terminar(data)) {
+            break;
+        }
+
+        pthread_mutex_lock(&data->mutex_scheduler);
+        int turno = data->turno_actual;
+        pthread_mutex_unlock(&data->mutex_scheduler);
+
+        if (turno == 1) {
+            printf("[P0] Turno elegido: P1\n");
+            sem_post(&shared->sem_pacman_turn);
+        } else {
+            printf("[P0] Turno elegido: P2\n");
+            sem_post(&shared->sem_enemy_turn);
+        }
+
+        sem_wait(&shared->sem_turn_done);
+
+        printf("[P0] Fin de turno confirmado\n");
+
+        sem_post(&data->sem_tick_finished);
+    }
+
+    printf("[P0-signal] signal_thread finalizado\n");
+
+    return NULL;
+}
+
 /*
     P0 = scheduler_process
 
@@ -1438,12 +1683,28 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
         Lo iniciamos en 2 para que, si hay empate,
         el primer turno sea P1.
     */
-    int ultimo_turno = 2;
     int finalizo_por_error = 0;
     int finalizo_por_agotamiento = 0;
 
     /*
+        Punto 2 (Parte B): P0 crea sus tres hilos internos.
+    */
+    SchedulerThreadData sched;
+    inicializar_scheduler_thread_data(&sched, shared);
+
+    pthread_t hilo_tick;
+    pthread_t hilo_scheduler;
+    pthread_t hilo_signal;
+
+    pthread_create(&hilo_tick, NULL, tick_thread, &sched);
+    pthread_create(&hilo_scheduler, NULL, scheduler_thread, &sched);
+    pthread_create(&hilo_signal, NULL, signal_thread, &sched);
+
+    /*
         6. Ciclo principal del scheduler.
+
+        Cada vuelta ejecuta un tick completo a través de la cadena
+        tick_thread -> scheduler_thread -> signal_thread -> P1/P2.
     */
     while (shared->game_over == 0 &&
            shared->global_tick < shared->max_ticks) {
@@ -1462,35 +1723,11 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
             break;
         }
 
-        shared->global_tick++;
-
-        printf("\n[P0] ==============================\n");
-        printf("[P0] Tick global %d\n", shared->global_tick);
-
         /*
-            P0 procesa solicitudes SET_PRIORITY al inicio del tick.
+            Disparar un tick y esperar a que la cadena de hilos lo complete.
         */
-        procesar_solicitudes_prioridad(shared);
-
-        /*
-            P0 decide quién recibe turno.
-        */
-        int turno = elegir_turno_por_prioridad(shared, &ultimo_turno);
-
-        if (turno == 1) {
-            printf("[P0] Turno elegido: P1\n");
-            sem_post(&shared->sem_pacman_turn);
-        } else {
-            printf("[P0] Turno elegido: P2\n");
-            sem_post(&shared->sem_enemy_turn);
-        }
-
-        /*
-            P0 espera a que P1 o P2 termine su turno.
-        */
-        sem_wait(&shared->sem_turn_done);
-
-        printf("[P0] Fin de turno confirmado\n");
+        sem_post(&sched.sem_tick_start);
+        sem_wait(&sched.sem_tick_finished);
 
         if (procesar_error_entrada(shared)) {
             finalizo_por_error = 1;
@@ -1524,13 +1761,29 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
     printf("[P0] game_over = %d\n", shared->game_over);
 
     /*
-        8. Liberar a P1 y P2 si están bloqueados esperando turno.
+        8. Detener los tres hilos internos de P0.
+           Estan inactivos esperando su semaforo de entrada, asi que
+           marcamos terminar y los despertamos uno por uno.
+    */
+    marcar_scheduler_terminar(&sched);
+    sem_post(&sched.sem_tick_start);
+    sem_post(&sched.sem_tick_ready);
+    sem_post(&sched.sem_turn_ready);
+
+    pthread_join(hilo_tick, NULL);
+    pthread_join(hilo_scheduler, NULL);
+    pthread_join(hilo_signal, NULL);
+
+    destruir_scheduler_thread_data(&sched);
+
+    /*
+        9. Liberar a P1 y P2 si están bloqueados esperando turno.
     */
     sem_post(&shared->sem_pacman_turn);
     sem_post(&shared->sem_enemy_turn);
 
     /*
-        9. Esperar procesos hijos.
+        10. Esperar procesos hijos.
     */
     int status_p1;
     int status_p2;
@@ -1542,7 +1795,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
     printf("[P0] P2 finalizó correctamente\n");
 
     /*
-        10. Liberar recursos compartidos.
+        11. Liberar recursos compartidos.
     */
     liberar_memoria_compartida(shared);
 
