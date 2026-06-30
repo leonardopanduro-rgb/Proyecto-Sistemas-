@@ -1,0 +1,5 @@
+pacman_concurrente
+pacman_tsan
+*.log
+CasoMin/
+*.o

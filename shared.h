@@ -47,6 +47,21 @@ typedef struct {
     int input_error;
     int input_error_process;
 
+    /*
+        Punto 10: banderas de finalizacion por agotamiento de entradas.
+
+        pacman_moves_finished:
+            P1 lo activa cuando ya consumio todas sus instrucciones.
+
+        ghost_moves_finished[i]:
+            P2 activa la posicion i cuando ese fantasma agoto su archivo.
+
+        P0 termina la simulacion cuando P1 y los cuatro fantasmas
+        agotaron sus entradas.
+    */
+    int pacman_moves_finished;
+    int ghost_moves_finished[NUM_GHOSTS];
+
     pthread_mutex_t mutex_shared;
 
     /*
