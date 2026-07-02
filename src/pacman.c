@@ -5,6 +5,15 @@
 #include "map.h"
 #include "shared.h"
 
+/*
+ * Aplica una instrucción de movimiento a Pac-Man.
+ *
+ * Calcula primero una posición candidata y solo la publica si está dentro del
+ * mapa y no es pared. Una pared consume la acción pero conserva la posición.
+ * Si avanza, suma diez puntos. IMPORTANTE: esta función no toma locks para no
+ * ocultar el contrato; movement_executor_thread debe llamarla manteniendo
+ * mutex_shared, pues modifica pacman_y, pacman_x y pacman_score como una unidad.
+ */
 void mover_pacman(SharedData *shared, const char *movimiento) {
     int nuevo_y = shared->pacman_y;
     int nuevo_x = shared->pacman_x;

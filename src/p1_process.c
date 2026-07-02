@@ -8,10 +8,15 @@
 #include "p1_threads.h"
 
 /*
-    P1 = pacman_process
-
-    Ahora P1 crea 3 hilos internos.
-*/
+ * Punto de entrada del proceso P1.
+ *
+ * shared es el mmap creado por P0 y carpeta_caso contiene pacman_moves.txt.
+ * P1 crea reader (productor), executor (acción autorizada por P0) y publisher
+ * (confirmación). Espera primero al executor; después marca terminar bajo
+ * mutex_cola y despierta cualquier hilo bloqueado. Los recursos se destruyen
+ * solo después de los joins, evitando uso de mutex o semáforos destruidos.
+ * Esta función no retorna: el proceso hijo termina con exit(0).
+ */
 void pacman_process(SharedData *shared, const char *carpeta_caso) {
     printf("[P1] pacman_process iniciado\n");
     printf("[P1] PID=%d | PPID=%d\n", getpid(), getppid());
@@ -35,8 +40,10 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
     marcar_pacman_terminar(&data);
 
     /*
-        Liberamos al reader por si estuviera esperando espacio.
-    */
+     * El reader podría estar bloqueado porque la cola estaba llena. Publicar
+     * una vez por cada espacio posible garantiza que despierte, observe la
+     * bandera terminar y salga.
+     */
     for (int i = 0; i < P1_QUEUE_SIZE; i++) {
         sem_post(&data.sem_hay_espacio);
     }

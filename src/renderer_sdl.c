@@ -30,15 +30,15 @@
 
 typedef struct { Uint8 r, g, b; } Color;
 
+/* Traduce Color al estado de dibujo del renderer; no accede a SharedData. */
 static void usar_color(SDL_Renderer *ren, Color c) {
     SDL_SetRenderDrawColor(ren, c.r, c.g, c.b, 255);
 }
 
 /*
-    Atiende la cola de eventos SDL para que la ventana no se congele.
-    Si el usuario cierra la ventana (SDL_QUIT), pedimos fin ordenado a todo
-    el sistema marcando game_over en memoria compartida.
-*/
+ * Atiende eventos SDL. SDL_QUIT publica game_over bajo mutex_shared: usar el
+ * mismo mutex que P0 y los demás lectores evita una carrera interproceso.
+ */
 static void procesar_eventos(SharedData *shared) {
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
@@ -50,10 +50,7 @@ static void procesar_eventos(SharedData *shared) {
     }
 }
 
-/*
-    Espera 'ms' milisegundos sin congelar la ventana (sigue atendiendo
-    eventos). No es busy loop: cede CPU con SDL_Delay.
-*/
+/* Espera ms atendiendo eventos y cediendo CPU con SDL_Delay, sin busy wait. */
 static void esperar_atendiendo_eventos(SharedData *shared, Uint32 ms) {
     Uint32 hasta = SDL_GetTicks() + ms;
     while (SDL_GetTicks() < hasta) {
@@ -62,6 +59,10 @@ static void esperar_atendiendo_eventos(SharedData *shared, Uint32 ms) {
     }
 }
 
+/*
+ * Dibuja mapa, vidas y entidades desde una instantánea local. No toma mutex ni
+ * modifica SharedData, de modo que una operación gráfica lenta no frena P1/P2.
+ */
 static void dibujar_frame(SDL_Renderer *ren,
                           int filas, int columnas,
                           char grid[MAX_Y][MAX_X],
@@ -127,6 +128,14 @@ static void dibujar_frame(SDL_Renderer *ren,
     SDL_RenderPresent(ren);
 }
 
+/*
+ * Punto de entrada de la variante SDL de P3.
+ *
+ * Conserva el protocolo exacto sem_render_turn -> snapshot con mutex_shared ->
+ * dibujo sin lock -> sem_render_done. En modo headless confirma cada barrera
+ * aunque no cree ventana, evitando congelar P0. Destruye objetos SDL y termina
+ * el hijo con exit(0).
+ */
 void renderer_process(SharedData *shared) {
     printf("[P3-SDL] renderer_process iniciado\n");
     printf("[P3-SDL] PID=%d | PPID=%d\n", getpid(), getppid());
@@ -176,7 +185,7 @@ void renderer_process(SharedData *shared) {
             procesar_eventos(shared);
         }
 
-        /* 3) Copia corta del estado bajo el MISMO mutex_shared. */
+        /* SECCIÓN CRÍTICA corta: copiar un frame consistente bajo el mutex. */
         char grid[MAX_Y][MAX_X];
         int filas, columnas, pacman_y, pacman_x;
         int score, lives, tick, game_over;

@@ -5,6 +5,11 @@
 #include "map.h"
 #include "shared.h"
 
+/*
+ * Copia las posiciones iniciales A..D del mmap al estado privado de P2.
+ * Se ejecuta antes de crear los hilos de P2, así que todavía no existe acceso
+ * concurrente a ghosts[].
+ */
 void inicializar_fantasmas_desde_shared(SharedData *shared, GhostState ghosts[]) {
     char simbolos[NUM_GHOSTS] = {'A', 'B', 'C', 'D'};
 
@@ -16,6 +21,14 @@ void inicializar_fantasmas_desde_shared(SharedData *shared, GhostState ghosts[])
     }
 }
 
+/*
+ * Aplica una instrucción al GhostState indicado.
+ *
+ * Una pared o límite conserva su posición y consume el turno. map_grid es
+ * inmutable. El arreglo de GhostState sí es compartido por hilos de P2; por
+ * contrato, ghost_thread_generico llama esta función manteniendo mutex_ghosts,
+ * evitando carreras con controller y collision_thread.
+ */
 void mover_fantasma(SharedData *shared, GhostState *ghost, const char *movimiento) {
     int nuevo_y = ghost->y;
     int nuevo_x = ghost->x;

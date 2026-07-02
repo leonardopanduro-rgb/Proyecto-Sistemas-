@@ -6,27 +6,15 @@
 
 #include "game.h"
 #include "p2_threads.h"
-
-
-
 /*
-    P2 = enemy_process
-
-    En este checkpoint P2 todavía se mantiene igual.
-    Sus hilos internos vienen en el siguiente checkpoint.
-*/
-/*
-    P2 = enemy_process
-
-    Ahora P2 crea hilos internos:
-    - enemy_controller
-    - ghost_thread_1
-    - ghost_thread_2
-    - ghost_thread_3
-    - ghost_thread_4
-    - pacman_tracker_thread
-    - collision_thread
-*/
+ * Punto de entrada del proceso P2.
+ *
+ * Crea controller, cuatro fantasmas, tracker y collision. Los argumentos de
+ * cada ghost incluyen un índice estable dentro del arreglo local. Al terminar
+ * controller, marca la bandera sincronizada y publica los semáforos de inicio
+ * para liberar trabajadores dormidos. Solo destruye recursos tras los siete
+ * pthread_join(), evitando carreras con objetos POSIX ya destruidos.
+ */
 void enemy_process(SharedData *shared, const char *carpeta_caso) {
     printf("[P2] enemy_process iniciado\n");
     printf("[P2] PID=%d | PPID=%d\n", getpid(), getppid());
@@ -63,9 +51,7 @@ void enemy_process(SharedData *shared, const char *carpeta_caso) {
 
     marcar_enemy_terminar(&data);
 
-    /*
-        Liberamos por seguridad los hilos internos.
-    */
+    /* Despertar cada posible sem_wait para que observe terminar=1 y salga. */
     for (int i = 0; i < NUM_GHOSTS; i++) {
         sem_post(&data.sem_ghost_turn[i]);
     }

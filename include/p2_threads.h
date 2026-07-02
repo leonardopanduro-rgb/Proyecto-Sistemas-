@@ -9,6 +9,7 @@
 
 typedef struct {
     SharedData *shared;
+    /* Estado privado de P2; los cuatro ghost threads comparten este arreglo. */
     GhostState ghosts[NUM_GHOSTS];
     char rutas_ghost[NUM_GHOSTS][256];
     int pacman_last_y;
@@ -18,11 +19,14 @@ typedef struct {
     int ghost_previous_y[NUM_GHOSTS];
     int ghost_previous_x[NUM_GHOSTS];
     int terminar;
+    /* Dominios separados reducen contención y hacen explícito quién protege qué. */
     pthread_mutex_t mutex_ghosts;
     pthread_mutex_t mutex_pacman_local;
     pthread_mutex_t mutex_terminar;
+    /* Cada pareja turn/done delimita exactamente una acción por fantasma. */
     sem_t sem_ghost_turn[NUM_GHOSTS];
     sem_t sem_ghost_done[NUM_GHOSTS];
+    /* Barreras de fase controladas exclusivamente por enemy_controller. */
     sem_t sem_tracker_start;
     sem_t sem_tracker_done;
     sem_t sem_collision_start;

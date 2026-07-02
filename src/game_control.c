@@ -3,6 +3,11 @@
 
 #include "game.h"
 
+/*
+    Publica el primer error de entrada observado por P1 o P2.
+    mutex_shared evita que dos lectores concurrentes sobrescriban el origen y
+    que P0 lea input_error_process a mitad de la actualizacion.
+*/
 void publicar_error_entrada(SharedData *shared, int process_id) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -19,6 +24,8 @@ void publicar_error_entrada(SharedData *shared, int process_id) {
 
 /*
     Solo P0 convierte el error publicado en una condicion de finalizacion.
+    Retorna 1 si activo game_over. La lectura y la escritura forman una unica
+    seccion critica para no perder el evento.
 */
 int procesar_error_entrada(SharedData *shared) {
     int process_id = 0;
@@ -42,8 +49,8 @@ int procesar_error_entrada(SharedData *shared) {
 }
 
 /*
-    Punto 10.
-    P1 avisa que ya no le quedan instrucciones validas.
+    P1 publica EOF una sola vez. El mutex evita una carrera entre el executor,
+    P0 y cualquier lector del estado de finalizacion.
 */
 void publicar_pacman_agotado(SharedData *shared) {
     pthread_mutex_lock(&shared->mutex_shared);
@@ -57,8 +64,8 @@ void publicar_pacman_agotado(SharedData *shared) {
 }
 
 /*
-    Punto 10.
-    P2 avisa que un fantasma agoto su archivo de movimientos.
+    P2 publica EOF para un ghost concreto. ghost_id debe estar entre 0 y 3.
+    mutex_shared protege el arreglo compartido frente a los cuatro ghost threads.
 */
 void publicar_fantasma_agotado(SharedData *shared, int ghost_id) {
     pthread_mutex_lock(&shared->mutex_shared);
@@ -73,8 +80,8 @@ void publicar_fantasma_agotado(SharedData *shared, int ghost_id) {
 }
 
 /*
-    Punto 10.
-    P0 termina cuando P1 y los cuatro fantasmas agotaron sus entradas.
+    Retorna 1 solo si P1 y los cuatro fantasmas agotaron sus entradas.
+    Se toma un snapshot bajo mutex para que P0 no decida con flags mezclados.
 */
 int entradas_agotadas(SharedData *shared) {
     int agotadas = 1;
@@ -96,6 +103,10 @@ int entradas_agotadas(SharedData *shared) {
     return agotadas;
 }
 
+/*
+    P1 escribe una solicitud en su buzon, no la prioridad efectiva.
+    El mutex vuelve atomica la pareja pending_priority + request_active.
+*/
 void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -108,6 +119,7 @@ void solicitar_prioridad_pacman(SharedData *shared, int nueva_prioridad) {
            nueva_prioridad);
 }
 
+/* Equivalente para P2; varios ghosts comparten este unico buzon protegido. */
 void solicitar_prioridad_enemy(SharedData *shared, int nueva_prioridad) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -120,6 +132,11 @@ void solicitar_prioridad_enemy(SharedData *shared, int nueva_prioridad) {
            nueva_prioridad);
 }
 
+/*
+    P0 consume ambos buzones al inicio del siguiente tick.
+    Mantiene el mutex durante validar, aplicar y limpiar cada solicitud para que
+    ningun productor publique una nueva solicitud en medio del consumo.
+*/
 void procesar_solicitudes_prioridad(SharedData *shared) {
     pthread_mutex_lock(&shared->mutex_shared);
 
@@ -162,6 +179,12 @@ void procesar_solicitudes_prioridad(SharedData *shared) {
     pthread_mutex_unlock(&shared->mutex_shared);
 }
 
+/*
+    Copia prioridades bajo mutex y elige 1=P1 o 2=P2.
+    Si empatan, ultimo_turno implementa Round Robin alternando el ganador.
+    Leer ambas prioridades bajo el mismo lock evita decidir con valores de
+    ticks distintos.
+*/
 int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
     int prioridad_pacman;
     int prioridad_enemy;
@@ -198,6 +221,11 @@ int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
     return 1;
 }
 
+/*
+    Consume en P0 el evento que P2 publico.
+    El mismo mutex protege evento, vidas y game_over; asi una colision se
+    descuenta exactamente una vez y ningun renderer observa un estado parcial.
+*/
 void procesar_colision_si_existe(SharedData *shared) {
     /*
         CHECKPOINT 13:
@@ -240,6 +268,7 @@ void procesar_colision_si_existe(SharedData *shared) {
 
 
 
+/* Imprime un snapshot consistente manteniendo mutex_shared durante la lectura. */
 void imprimir_estado_tick(SharedData *shared) {
     /*
         CHECKPOINT 13:

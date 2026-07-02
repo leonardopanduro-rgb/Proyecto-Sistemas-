@@ -6,6 +6,23 @@
 #include "p2_threads.h"
 #include "ghost.h"
 
+/*
+ * Coordinación interna del proceso P2.
+ *
+ * enemy_controller dirige una fase ordenada por cada turno de P0: tracker,
+ * cuatro fantasmas en paralelo, detector de colisión y confirmación a P0.
+ * mutex_ghosts protege posiciones actuales/anteriores; mutex_pacman_local
+ * protege la copia local de Pac-Man; mutex_terminar elimina la race sobre la
+ * bandera de cierre. Cada pareja sem_*_start/done actúa como una barrera de
+ * fase y evita que collision_thread lea posiciones mientras aún cambian.
+ */
+
+/*
+ * Inicializa datos y sincronización privada de P2.
+ * data permanece válido hasta unir los siete hilos; shared es el mmap común y
+ * carpeta_caso permite construir un archivo distinto para cada fantasma. Los
+ * semáforos usan pshared=0 porque solo coordinan hilos del mismo proceso.
+ */
 void inicializar_enemy_thread_data(
     EnemyThreadData *data,
     SharedData *shared,
@@ -55,13 +72,7 @@ void inicializar_enemy_thread_data(
     sem_init(&data->sem_collision_done, 0, 0);
 }
 
-/*
-    Libera recursos internos de P2.
-*/
-/*
-    Punto 13.
-    El acceso a data->terminar de P2 se centraliza bajo mutex_terminar.
-*/
+/* Lee terminar bajo mutex_terminar para evitar carreras durante el cierre. */
 int enemy_debe_terminar(EnemyThreadData *data) {
     int valor;
 
@@ -72,12 +83,14 @@ int enemy_debe_terminar(EnemyThreadData *data) {
     return valor;
 }
 
+/* Escribe terminar=1 bajo el mismo mutex que usan todas las lecturas. */
 void marcar_enemy_terminar(EnemyThreadData *data) {
     pthread_mutex_lock(&data->mutex_terminar);
     data->terminar = 1;
     pthread_mutex_unlock(&data->mutex_terminar);
 }
 
+/* Destruye mutex y semáforos privados solo después de todos los joins. */
 void destruir_enemy_thread_data(EnemyThreadData *data) {
     pthread_mutex_destroy(&data->mutex_ghosts);
     pthread_mutex_destroy(&data->mutex_pacman_local);
@@ -96,11 +109,14 @@ void destruir_enemy_thread_data(EnemyThreadData *data) {
 }
 
 /*
-    Hilo auxiliar general para fantasmas.
-
-    Los wrappers ghost_thread_1, ghost_thread_2, etc.
-    llaman a esta función.
-*/
+ * Implementación común de los cuatro hilos fantasma.
+ *
+ * arg contiene EnemyThreadData y el índice 0..3. Cada hilo abre su propio
+ * archivo y espera sem_ghost_turn[id], por lo que no actúa sin que controller
+ * inicie la fase. mutex_ghosts serializa los cambios al arreglo compartido
+ * dentro de P2. Al terminar su única acción publica sem_ghost_done[id].
+ * Retorna NULL como exige pthread_create().
+ */
 void *ghost_thread_generico(void *arg) {
     GhostThreadArg *ghost_arg = (GhostThreadArg *)arg;
     EnemyThreadData *data = ghost_arg->data;
@@ -172,9 +188,7 @@ void *ghost_thread_generico(void *arg) {
     return NULL;
 }
 
-/*
-    Wrappers con los nombres pedidos por la profesora.
-*/
+/* Wrappers que conservan los cuatro nombres exigidos y delegan la lógica. */
 void *ghost_thread_1(void *arg) {
     return ghost_thread_generico(arg);
 }
@@ -192,11 +206,13 @@ void *ghost_thread_4(void *arg) {
 }
 
 /*
-    Hilo pacman_tracker_thread.
-
-    Lee la posición actual de Pac-Man desde memoria compartida
-    y guarda una copia local dentro de P2.
-*/
+ * Hilo de seguimiento de Pac-Man.
+ *
+ * Lee pacman_x/y juntos bajo mutex_shared y luego actualiza la copia actual y
+ * anterior bajo mutex_pacman_local. Los mutex pertenecen a dominios distintos
+ * y nunca se mantienen simultáneamente, reduciendo riesgo de deadlock. El par
+ * tracker_start/tracker_done impide que controller avance con datos antiguos.
+ */
 void *pacman_tracker_thread(void *arg) {
     EnemyThreadData *data = (EnemyThreadData *)arg;
     SharedData *shared = data->shared;
@@ -219,10 +235,7 @@ void *pacman_tracker_thread(void *arg) {
 
         pthread_mutex_lock(&data->mutex_pacman_local);
 
-        /*
-            Antes de sobrescribir, conservamos la posición anterior para
-            poder detectar el cruce con un fantasma.
-        */
+        /* Conservar ambos estados permite detectar intercambio de celdas. */
         data->pacman_previous_y = data->pacman_last_y;
         data->pacman_previous_x = data->pacman_last_x;
 
@@ -242,11 +255,14 @@ void *pacman_tracker_thread(void *arg) {
 }
 
 /*
-    Hilo collision_thread.
-
-    Compara la copia local de Pac-Man con las posiciones internas
-    de los fantasmas.
-*/
+ * Hilo detector y publicador de colisiones.
+ *
+ * Se activa después de los cuatro ghost_done. Toma instantáneas protegidas de
+ * Pac-Man y fantasmas, detecta misma celda o intercambio, y publica posiciones
+ * y evento bajo mutex_shared. P2 no descuenta vidas: P0 consume el evento una
+ * sola vez. sem_collision_done garantiza que controller no confirme el turno
+ * antes de completar esa publicación.
+ */
 void *collision_thread(void *arg) {
     EnemyThreadData *data = (EnemyThreadData *)arg;
     SharedData *shared = data->shared;
@@ -274,11 +290,7 @@ void *collision_thread(void *arg) {
         char ghost_simbolo = '?';
         const char *motivo = "";
 
-        /*
-            BONUS P3: capturamos la posicion ACTUAL de los cuatro fantasmas
-            para publicarla luego en memoria compartida. Se lee aqui, dentro
-            de mutex_ghosts, para tener una foto consistente.
-        */
+        /* Instantánea consistente: ningún ghost puede modificarla a la vez. */
         int ghost_pub_y[NUM_GHOSTS];
         int ghost_pub_x[NUM_GHOSTS];
 
@@ -295,19 +307,13 @@ void *collision_thread(void *arg) {
             int gpy = data->ghost_previous_y[i];
             int gpx = data->ghost_previous_x[i];
 
-            /*
-                Cruce: Pac-Man y el fantasma intercambian posiciones.
-                Pac-Man actual == posición anterior del fantasma y
-                Pac-Man anterior == posición actual del fantasma.
-            */
+            /* Cruce: ambas entidades intercambiaron sus celdas en el tick. */
             if (pacman_y == gpy && pacman_x == gpx &&
                 pacman_prev_y == gy && pacman_prev_x == gx) {
                 colision = 1;
                 motivo = "cruce";
             }
-            /*
-                Choque: el fantasma terminó en la celda de Pac-Man.
-            */
+            /* Choque directo: ambos terminaron en la misma celda. */
             else if (pacman_y == gy && pacman_x == gx) {
                 colision = 1;
                 motivo = "choque";
@@ -324,9 +330,9 @@ void *collision_thread(void *arg) {
         pthread_mutex_lock(&shared->mutex_shared);
 
         /*
-            BONUS P3: publicar el estado visible de los enemigos (posicion
-            actual) bajo el MISMO mutex_shared, en cada turno de P2.
-        */
+         * SECCIÓN CRÍTICA INTERPROCESO: posiciones y evento se publican como
+         * una unidad; renderer y P0 nunca observan un frame parcialmente nuevo.
+         */
         for (int i = 0; i < NUM_GHOSTS; i++) {
             shared->ghost_y[i] = ghost_pub_y[i];
             shared->ghost_x[i] = ghost_pub_x[i];
@@ -357,16 +363,15 @@ void *collision_thread(void *arg) {
 }
 
 /*
-    Hilo enemy_controller.
-
-    Este hilo espera el permiso de P0.
-    Cuando P0 le da turno a P2:
-    1. Activa pacman_tracker_thread.
-    2. Activa los 4 ghost_thread.
-    3. Espera a que todos terminen.
-    4. Activa collision_thread.
-    5. Avisa a P0 con sem_turn_done.
-*/
+ * Hilo controlador de P2.
+ *
+ * Espera sem_enemy_turn, única autorización emitida por P0. Ejecuta fases:
+ * (1) tracker y espera done; (2) guarda posiciones anteriores bajo mutex;
+ * (3) despierta cuatro fantasmas; (4) espera sus cuatro done; (5) ejecuta y
+ * espera collision; (6) publica sem_turn_done. Estas barreras permiten mover
+ * fantasmas en paralelo sin que detección, publicación o siguiente tick se
+ * adelanten. En cierre despierta trabajadores para que alcancen sus joins.
+ */
 void *enemy_controller(void *arg) {
     EnemyThreadData *data = (EnemyThreadData *)arg;
     SharedData *shared = data->shared;

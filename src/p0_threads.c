@@ -5,6 +5,12 @@
 #include "game.h"
 #include "p0_threads.h"
 
+/*
+    Inicializa la tuberia interna de P0:
+    P0-main -> tick_thread -> scheduler_thread -> signal_thread -> P0-main.
+    Los semaforos usan pshared=0 porque estos hilos viven en el mismo proceso.
+    Inician en cero para impedir que una etapa adelante a la anterior.
+*/
 void inicializar_scheduler_thread_data(SchedulerThreadData *data, SharedData *shared) {
     data->shared = shared;
     data->turno_actual = 0;
@@ -23,6 +29,7 @@ void inicializar_scheduler_thread_data(SchedulerThreadData *data, SharedData *sh
     sem_init(&data->sem_tick_finished, 0, 0);
 }
 
+/* Destruye los recursos solo despues de hacer join de los tres hilos de P0. */
 void destruir_scheduler_thread_data(SchedulerThreadData *data) {
     pthread_mutex_destroy(&data->mutex_scheduler);
 
@@ -33,7 +40,8 @@ void destruir_scheduler_thread_data(SchedulerThreadData *data) {
 }
 
 /*
-    Punto 13 aplicado tambien a P0: terminar se accede solo con mutex.
+    Lee terminar bajo mutex_scheduler. Esto evita una carrera entre P0-main,
+    que solicita el cierre, y los tres hilos que consultan la bandera.
 */
 int scheduler_debe_terminar(SchedulerThreadData *data) {
     int valor;
@@ -45,6 +53,7 @@ int scheduler_debe_terminar(SchedulerThreadData *data) {
     return valor;
 }
 
+/* Activa terminar bajo el mismo mutex usado por scheduler_debe_terminar(). */
 void marcar_scheduler_terminar(SchedulerThreadData *data) {
     pthread_mutex_lock(&data->mutex_scheduler);
     data->terminar = 1;
@@ -52,8 +61,10 @@ void marcar_scheduler_terminar(SchedulerThreadData *data) {
 }
 
 /*
-    tick_thread:
-    espera sem_tick_start, incrementa global_tick y publica sem_tick_ready.
+    Primera etapa del tick.
+    sem_tick_start impide incrementar por cuenta propia. global_tick se modifica
+    bajo mutex_shared para sincronizarlo con P0/P1/P2/P3. sem_tick_ready entrega
+    exactamente un tick al scheduler_thread.
 */
 void *tick_thread(void *arg) {
     SchedulerThreadData *data = (SchedulerThreadData *)arg;
@@ -85,9 +96,10 @@ void *tick_thread(void *arg) {
 }
 
 /*
-    scheduler_thread:
-    procesa solicitudes de prioridad, compara prioridades y escribe
-    turno_actual.
+    Segunda etapa del tick.
+    Espera sem_tick_ready, consume SET_PRIORITY y calcula turno_actual. El campo
+    local se protege con mutex_scheduler porque signal_thread lo lee en paralelo.
+    sem_turn_ready garantiza que signal_thread no use un turno antiguo.
 */
 void *scheduler_thread(void *arg) {
     SchedulerThreadData *data = (SchedulerThreadData *)arg;
@@ -119,9 +131,10 @@ void *scheduler_thread(void *arg) {
 }
 
 /*
-    signal_thread:
-    libera el semaforo del proceso elegido, espera sem_turn_done y confirma
-    el final del tick con sem_tick_finished.
+    Tercera etapa del tick.
+    Publica solo sem_pacman_turn o sem_enemy_turn: nunca ambos. Luego espera
+    sem_turn_done, que actua como barrera entre procesos. Sin esta espera P0
+    podria incrementar otro tick mientras P1/P2 aun modifica el estado.
 */
 void *signal_thread(void *arg) {
     SchedulerThreadData *data = (SchedulerThreadData *)arg;

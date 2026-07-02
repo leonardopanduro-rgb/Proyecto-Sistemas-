@@ -12,12 +12,18 @@
 #include "renderer.h"
 
 /*
-    P0 = scheduler_process
-
-    Este es el proceso principal.
-    Crea memoria compartida, carga el mapa, crea P1 y P2,
-    controla los ticks, decide turnos y espera fin de turno.
-*/
+ * P0: propietario del ciclo de vida y del scheduler global.
+ *
+ * carpeta_caso contiene mapa y movimientos; max_ticks_arg reemplaza el límite
+ * por defecto si es positivo; render_enabled decide si se crea P3. Retorna 0
+ * si la simulación y todos los hijos terminan correctamente, o 1 ante entrada
+ * inválida, fork/wait fallido o hijo con error.
+ *
+ * Flujo: crea mmap y sincronización -> valida mapa -> fork P1/P2/P3 -> crea
+ * tres hilos de P0 -> ejecuta ticks completos -> publica game_over -> despierta
+ * y une hilos/hijos -> destruye recursos. P0 es el único que avanza ticks,
+ * decide turnos y descuenta vidas, evitando escrituras competidoras.
+ */
 int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_enabled) {
     printf("Pac-Man concurrente POSIX - Checkpoint 13\n");
     printf("[P0] scheduler_process con mitigación de race conditions\n");
@@ -174,11 +180,11 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
     pthread_create(&hilo_signal, NULL, signal_thread, &sched);
 
     /*
-        6. Ciclo principal del scheduler.
-
-        Cada vuelta ejecuta un tick completo a través de la cadena
-        tick_thread -> scheduler_thread -> signal_thread -> P1/P2.
-    */
+     * Cada vuelta es una transacción de tick:
+     * tick_thread -> scheduler_thread -> signal_thread -> P1/P2 -> turn_done.
+     * sem_tick_finished solo llega después de esa cadena, por lo que no puede
+     * existir más de un proceso ejecutando una acción lógica por tick.
+     */
     while (1) {
         int game_over;
         int global_tick;
@@ -209,9 +215,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
             break;
         }
 
-        /*
-            Disparar un tick y esperar a que la cadena de hilos lo complete.
-        */
+        /* Barrera: P0 principal no procesa estado hasta finalizar el turno. */
         sem_post(&sched.sem_tick_start);
         sem_wait(&sched.sem_tick_finished);
 
@@ -220,9 +224,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
             break;
         }
 
-        /*
-            P0 procesa colisiones publicadas por P2.
-        */
+        /* P0 consume bajo mutex el evento de P2 y es el único que baja vidas. */
         procesar_colision_si_existe(shared);
 
         imprimir_estado_tick(shared);
@@ -282,10 +284,10 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
     printf("[P0] game_over = %d\n", obtener_game_over(shared));
 
     /*
-        8. Detener los tres hilos internos de P0.
-           Estan inactivos esperando su semaforo de entrada, asi que
-           marcamos terminar y los despertamos uno por uno.
-    */
+     * Cierre de hilos P0: la bandera se escribe bajo mutex_scheduler y cada
+     * sem_post libera una fase que pudiera estar dormida. Los joins ocurren
+     * antes de destruir sus semáforos y mutex.
+     */
     marcar_scheduler_terminar(&sched);
     sem_post(&sched.sem_tick_start);
     sem_post(&sched.sem_tick_ready);
@@ -297,9 +299,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
 
     destruir_scheduler_thread_data(&sched);
 
-    /*
-        9. Liberar a P1 y P2 si están bloqueados esperando turno.
-    */
+    /* game_over ya está publicado; despertar P1/P2 les permite observarlo. */
     sem_post(&shared->sem_pacman_turn);
     sem_post(&shared->sem_enemy_turn);
 
@@ -311,9 +311,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
         sem_post(&shared->sem_render_turn);
     }
 
-    /*
-        10. Esperar procesos hijos.
-    */
+    /* waitpid de todos los hijos evita zombies y precede a munmap(). */
     int hijos_ok = 1;
 
     if (!esperar_hijo_correctamente(pid_pacman, "P1")) {
@@ -330,9 +328,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
         }
     }
 
-    /*
-        11. Liberar recursos compartidos.
-    */
+    /* Último paso: nadie conserva ya una referencia válida al mmap. */
     liberar_memoria_compartida(shared);
 
     printf("[P0] Recursos liberados\n");

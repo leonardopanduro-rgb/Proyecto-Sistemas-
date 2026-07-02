@@ -5,7 +5,9 @@
 #include "game.h"
 
 /*
-    Elimina espacios, tabulaciones, '\n' y '\r' de ambos extremos.
+    Normaliza una instruccion en el mismo buffer.
+    Elimina espacios, tabulaciones, '\n' y '\r' de ambos extremos. No usa
+    memoria compartida y por tanto no necesita mutex.
 */
 void limpiar_espacios_movimiento(char movimiento[]) {
     int inicio = 0;
@@ -32,7 +34,10 @@ void limpiar_espacios_movimiento(char movimiento[]) {
 
 /*
     Valida la forma de una instruccion sin ejecutarla.
-    El rango de prioridad sigue siendo responsabilidad de P0.
+
+    Retorna 1 para UP/DOWN/LEFT/RIGHT o SET_PRIORITY seguido de exactamente un
+    entero; retorna 0 en cualquier otro caso. El rango se valida despues en P0,
+    porque P1/P2 solo pueden solicitar y nunca aplicar una prioridad efectiva.
 */
 int instruccion_movimiento_valida(const char *movimiento) {
     if (strcmp(movimiento, "UP") == 0 ||
@@ -56,8 +61,11 @@ int instruccion_movimiento_valida(const char *movimiento) {
 }
 
 /*
-    Retorna un estado diferente para instruccion valida, EOF y error.
-    Las lineas vacias se ignoran y no terminan la lectura.
+    Lee y valida una instruccion desde un FILE.
+
+    Retorna LECTURA_OK, LECTURA_FIN, LECTURA_INVALIDA o LECTURA_ERROR. Las
+    lineas vacias se ignoran. Detectar cada estado por separado permite que los
+    productores publiquen EOF o error sin bloquear a sus consumidores.
 */
 int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
     if (archivo == NULL) {
@@ -96,6 +104,10 @@ int leer_movimiento(FILE *archivo, char movimiento[], int tam) {
     return LECTURA_FIN;
 }
 
+/*
+    Extrae el entero de SET_PRIORITY y lo escribe en nueva_prioridad.
+    Retorna 1 si la instruccion tiene esa forma; no cambia SharedData.
+*/
 int extraer_prioridad(const char *movimiento, int *nueva_prioridad) {
     char comando[32];
     int valor;
@@ -110,6 +122,7 @@ int extraer_prioridad(const char *movimiento, int *nueva_prioridad) {
     return 0;
 }
 
+/* Retorna 1 cuando P0 puede aceptar la prioridad dentro del rango 1..100. */
 int prioridad_valida(int prioridad) {
     return prioridad >= PRIORIDAD_MIN && prioridad <= PRIORIDAD_MAX;
 }

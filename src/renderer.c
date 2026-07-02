@@ -72,6 +72,15 @@ static void dibujar_frame(int filas, int columnas,
     refresh();
 }
 
+/*
+ * Punto de entrada del proceso P3 ncurses.
+ *
+ * Espera una autorización sem_render_turn por frame, copia todo el estado bajo
+ * mutex_shared y dibuja después de soltarlo. Así obtiene una imagen coherente
+ * sin retener el mutex durante E/S lenta. sem_render_done confirma a P0 que el
+ * frame solicitado acabó. Si no existe terminal, mantiene igualmente este
+ * protocolo para que la simulación headless no se bloquee. No retorna: exit(0).
+ */
 void renderer_process(SharedData *shared) {
     printf("[P3] renderer_process iniciado\n");
     printf("[P3] PID=%d | PPID=%d\n", getpid(), getppid());
@@ -108,11 +117,7 @@ void renderer_process(SharedData *shared) {
         */
         sem_wait(&shared->sem_render_turn);
 
-        /*
-            Copia del estado bajo el MISMO mutex que protege el resto de
-            la memoria compartida. Solo se copia (rapido); el dibujado va
-            despues, fuera del lock, para no bloquear a P1/P2.
-        */
+        /* SECCIÓN CRÍTICA: crear una instantánea; nunca dibujar con el lock. */
         char grid[MAX_Y][MAX_X];
         int filas, columnas;
         int pacman_y, pacman_x;

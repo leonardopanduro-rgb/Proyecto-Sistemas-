@@ -9,13 +9,16 @@
 #define P1_QUEUE_SIZE 128
 
 typedef struct {
+    /* Cola circular: frente consume, final produce y cantidad distingue estado. */
     char movimientos[P1_QUEUE_SIZE][MAX_MOVE];
     int frente;
     int final;
     int cantidad;
     int lector_termino;
     int terminar;
+    /* Protege cola, índices, cantidad, lector_termino y terminar. */
     pthread_mutex_t mutex_cola;
+    /* Contadores productor-consumidor y barrera executor->publisher. */
     sem_t sem_hay_movimientos;
     sem_t sem_hay_espacio;
     sem_t sem_estado_pacman_listo;

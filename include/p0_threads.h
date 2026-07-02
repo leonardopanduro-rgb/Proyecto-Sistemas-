@@ -8,10 +8,12 @@
 
 typedef struct {
     SharedData *shared;
+    /* turno_actual, ultimo_turno y terminar se protegen con este mutex. */
     int turno_actual;
     int ultimo_turno;
     int terminar;
     pthread_mutex_t mutex_scheduler;
+    /* Pipeline local P0: main->tick->scheduler->signal->main. */
     sem_t sem_tick_start;
     sem_t sem_tick_ready;
     sem_t sem_turn_ready;

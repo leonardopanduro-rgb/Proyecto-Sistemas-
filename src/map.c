@@ -4,9 +4,7 @@
 #include "map.h"
 #include "shared.h"
 
-/*
-    Retorna 1 solamente para los simbolos definidos por el proyecto.
-*/
+/* Retorna 1 para X/O/P/A/B/C/D y 0 para cualquier símbolo inválido. */
 static int es_simbolo_mapa_valido(char celda) {
     return celda == 'X' ||
            celda == 'O' ||
@@ -17,9 +15,7 @@ static int es_simbolo_mapa_valido(char celda) {
            celda == 'D';
 }
 
-/*
-    Convierte A, B, C y D en los indices 0, 1, 2 y 3.
-*/
+/* Convierte A..D a índices 0..3; retorna -1 si no es un fantasma. */
 static int obtener_indice_fantasma(char celda) {
     if (celda >= 'A' && celda <= 'D') {
         return celda - 'A';
@@ -28,6 +24,15 @@ static int obtener_indice_fantasma(char celda) {
     return -1;
 }
 
+/*
+ * Lee y valida completamente map.txt antes de publicar estado.
+ *
+ * ruta_mapa es la ruta de entrada y shared es el mmap ya inicializado. Valida
+ * tamaño, ancho uniforme, símbolos y exactamente un P/A/B/C/D. Construye todo
+ * en variables temporales: si aparece un error, otros procesos nunca reciben
+ * un mapa parcial. P0 llama esta función antes de fork(), por lo que todavía
+ * no hacen falta locks. Retorna 0 al cargar o 1 ante cualquier error.
+ */
 int cargar_mapa(const char *ruta_mapa, SharedData *shared) {
     FILE *archivo = fopen(ruta_mapa, "r");
 
@@ -214,6 +219,11 @@ int cargar_mapa(const char *ruta_mapa, SharedData *shared) {
     return 0;
 }
 
+/*
+ * Retorna 1 si (y,x) está dentro del rectángulo y no contiene pared X.
+ * Comprueba límites antes de indexar map_grid, evitando accesos out-of-bounds.
+ * El mapa es inmutable tras cargarlo, por eso leerlo no requiere mutex.
+ */
 int es_celda_valida(SharedData *shared, int y, int x) {
     if (y < 0 || y >= shared->filas) {
         return 0;
@@ -230,6 +240,7 @@ int es_celda_valida(SharedData *shared, int y, int x) {
     return 1;
 }
 
+/* Imprime el mapa base inmutable; P0 la usa antes de crear procesos hijos. */
 void imprimir_mapa(SharedData *shared) {
     printf("\nMapa base cargado en shared->map_grid:\n");
 
