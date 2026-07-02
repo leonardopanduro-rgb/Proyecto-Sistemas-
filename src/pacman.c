@@ -44,4 +44,3 @@ void mover_pacman(SharedData *shared, const char *movimiento) {
                shared->pacman_x);
     }
 }
-

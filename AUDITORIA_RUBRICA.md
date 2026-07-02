@@ -345,4 +345,38 @@ simulación. En la prueba de fallo se mató P3 con `SIGKILL`; P0 imprimió
 El Makefile también fuerza la compilación correcta en `make run-render` y
 `make run-sdl`, evitando ejecutar por accidente un binario construido con el
 backend anterior. El target TSan usa `-fno-pie -no-pie`, combinación que evitó
-el fallo `unexpected memory mapping` observado en este entorno.
+el fallo `unexpected memory mapping` en varias ejecuciones, aunque el runtime
+del entorno todavía puede producirlo de forma intermitente antes de `main()`.
+
+## 14. Reorganización modular
+
+El antiguo `main.c` de 2138 líneas fue dividido sin cambiar los cuerpos ni el
+orden de ejecución. El nuevo `main.c` tiene 37 líneas y se limita a argumentos.
+
+| Responsabilidad anterior | Ubicación nueva |
+|---|---|
+| Memoria compartida y snapshots | `src/shared_state.c` |
+| Utilidades de procesos y P3 | `src/process_utils.c` |
+| Parsing y validaciones | `src/validation.c` |
+| Prioridades, EOF, colisiones y estado | `src/game_control.c` |
+| Proceso P0 | `src/scheduler_process.c` |
+| Hilos de P0 | `src/p0_threads.c` |
+| Proceso P1 | `src/p1_process.c` |
+| Hilos y cola de P1 | `src/p1_threads.c` |
+| Proceso P2 | `src/p2_process.c` |
+| Hilos de P2 y colisiones | `src/p2_threads.c` |
+| Interfaces | `include/*.h` |
+
+Regresión posterior a la reorganización:
+
+- build normal sin errores ni warnings;
+- Caso1 normal exit 0;
+- faltante/ inválido exit 1;
+- entradas vacías terminan por agotamiento;
+- ncurses 10 ticks/10 frames;
+- SDL2 10 ticks/10 frames;
+- al matar P0 no quedan hijos vivos.
+
+Las referencias `archivo:línea` de las secciones 1–11 corresponden al commit
+baseline indicado al inicio. La relación actual por módulo está documentada en
+`ARQUITECTURA.md` y los nombres de todas las funciones exigidas se conservaron.

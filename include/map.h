@@ -8,4 +8,3 @@ int es_celda_valida(SharedData *shared, int y, int x);
 void imprimir_mapa(SharedData *shared);
 
 #endif
-

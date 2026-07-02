@@ -6,4 +6,3 @@
 void mover_pacman(SharedData *shared, const char *movimiento);
 
 #endif
-

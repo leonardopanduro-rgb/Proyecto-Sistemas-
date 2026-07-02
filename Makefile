@@ -1,12 +1,25 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -g -D_GNU_SOURCE
+CFLAGS = -Wall -Wextra -g -D_GNU_SOURCE -Iinclude
 LDFLAGS = -pthread
 
 TARGET = pacman_concurrente
 
 # Fuentes comunes (todo menos el renderer de P3, que se elige con RENDER).
-BASE_SOURCES = main.c map.c pacman.c ghost.c
-HEADERS = shared.h map.h pacman.h ghost.h renderer.h
+BASE_SOURCES = main.c \
+	src/shared_state.c \
+	src/process_utils.c \
+	src/validation.c \
+	src/game_control.c \
+	src/p1_threads.c \
+	src/p1_process.c \
+	src/p2_threads.c \
+	src/p2_process.c \
+	src/p0_threads.c \
+	src/scheduler_process.c \
+	src/map.c \
+	src/pacman.c \
+	src/ghost.c
+HEADERS = $(wildcard include/*.h)
 
 # Selector del renderer de P3:
 #   make              -> consola con ncurses  (renderer.c)      [por defecto]
@@ -15,10 +28,10 @@ HEADERS = shared.h map.h pacman.h ghost.h renderer.h
 RENDER ?= console
 
 ifeq ($(RENDER),sdl)
-    RENDER_SRC  = renderer_sdl.c
+    RENDER_SRC  = src/renderer_sdl.c
     RENDER_LIBS = $(shell sdl2-config --cflags --libs)
 else
-    RENDER_SRC  = renderer.c
+    RENDER_SRC  = src/renderer.c
     RENDER_LIBS = -lncurses
 endif
 
