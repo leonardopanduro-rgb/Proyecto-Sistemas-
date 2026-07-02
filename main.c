@@ -13,6 +13,7 @@
 #include "pacman.h"
 #include "ghost.h"
 #include "collision.h"
+#include "renderer.h"
 
 #define PRIORIDAD_MIN 1
 #define PRIORIDAD_MAX 100
@@ -166,6 +167,15 @@ void inicializar_shared(SharedData *shared) {
         shared->ghost_start_y[i] = 0;
     }
 
+    /*
+        BONUS P3: posiciones actuales de los fantasmas.
+        Se ponen en las de inicio despues de cargar el mapa.
+    */
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        shared->ghost_x[i] = 0;
+        shared->ghost_y[i] = 0;
+    }
+
     shared->collision_detected = 0;
     shared->collision_tick = -1;
     shared->collision_ghost_id = -1;
@@ -196,12 +206,21 @@ void inicializar_shared(SharedData *shared) {
     sem_init(&shared->sem_pacman_turn, 1, 0);
     sem_init(&shared->sem_enemy_turn, 1, 0);
     sem_init(&shared->sem_turn_done, 1, 0);
+
+    /*
+        BONUS P3: semaforos process-shared para sincronizar el renderer.
+    */
+    sem_init(&shared->sem_render_turn, 1, 0);
+    sem_init(&shared->sem_render_done, 1, 0);
 }
 
 void liberar_memoria_compartida(SharedData *shared) {
     sem_destroy(&shared->sem_pacman_turn);
     sem_destroy(&shared->sem_enemy_turn);
     sem_destroy(&shared->sem_turn_done);
+
+    sem_destroy(&shared->sem_render_turn);
+    sem_destroy(&shared->sem_render_done);
 
     pthread_mutex_destroy(&shared->mutex_shared);
 
@@ -1169,7 +1188,20 @@ void *collision_thread(void *arg) {
         char ghost_simbolo = '?';
         const char *motivo = "";
 
+        /*
+            BONUS P3: capturamos la posicion ACTUAL de los cuatro fantasmas
+            para publicarla luego en memoria compartida. Se lee aqui, dentro
+            de mutex_ghosts, para tener una foto consistente.
+        */
+        int ghost_pub_y[NUM_GHOSTS];
+        int ghost_pub_x[NUM_GHOSTS];
+
         pthread_mutex_lock(&data->mutex_ghosts);
+
+        for (int i = 0; i < NUM_GHOSTS; i++) {
+            ghost_pub_y[i] = data->ghosts[i].y;
+            ghost_pub_x[i] = data->ghosts[i].x;
+        }
 
         for (int i = 0; i < NUM_GHOSTS; i++) {
             int gy = data->ghosts[i].y;
@@ -1213,6 +1245,15 @@ void *collision_thread(void *arg) {
         pthread_mutex_unlock(&data->mutex_ghosts);
 
         pthread_mutex_lock(&shared->mutex_shared);
+
+        /*
+            BONUS P3: publicar el estado visible de los enemigos (posicion
+            actual) bajo el MISMO mutex_shared, en cada turno de P2.
+        */
+        for (int i = 0; i < NUM_GHOSTS; i++) {
+            shared->ghost_y[i] = ghost_pub_y[i];
+            shared->ghost_x[i] = ghost_pub_x[i];
+        }
 
         if (colision == 1) {
             printf("\n[P2-collision] COLISIÓN (%s) con fantasma %c\n",
@@ -1589,7 +1630,7 @@ void *signal_thread(void *arg) {
     Crea memoria compartida, carga el mapa, crea P1 y P2,
     controla los ticks, decide turnos y espera fin de turno.
 */
-int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
+int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_enabled) {
     printf("Pac-Man concurrente POSIX - Checkpoint 13\n");
     printf("[P0] scheduler_process con mitigación de race conditions\n");
 
@@ -1628,6 +1669,16 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
     }
 
     imprimir_mapa(shared);
+
+    /*
+        BONUS P3: dejar visibles las posiciones iniciales de los fantasmas
+        para que P3 pueda dibujarlas desde el primer cuadro, antes incluso
+        de que P2 tenga su primer turno.
+    */
+    for (int i = 0; i < NUM_GHOSTS; i++) {
+        shared->ghost_x[i] = shared->ghost_start_x[i];
+        shared->ghost_y[i] = shared->ghost_start_y[i];
+    }
 
     printf("[P0] Estado compartido base inicializado\n");
     printf("[P0] Pac-Man en shared: (%d,%d)\n",
@@ -1674,9 +1725,34 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
         enemy_process(shared, carpeta_caso);
     }
 
+    /*
+        BONUS: Crear P3 = renderer_process (solo si se paso --render).
+        Este fork lo ejecuta unicamente P0: P1 y P2 llaman a exit() dentro
+        de sus funciones, por lo que nunca llegan a esta linea.
+    */
+    pid_t pid_render = -1;
+
+    if (render_enabled) {
+        pid_render = fork();
+
+        if (pid_render < 0) {
+            perror("[P0] Error al crear P3");
+            liberar_memoria_compartida(shared);
+            return 1;
+        }
+
+        if (pid_render == 0) {
+            renderer_process(shared);
+        }
+    }
+
     printf("[P0] Procesos creados: P1 PID=%d, P2 PID=%d\n",
            pid_pacman,
            pid_enemy);
+
+    if (render_enabled) {
+        printf("[P0] Proceso P3 (renderer) PID=%d\n", pid_render);
+    }
 
     /*
         ultimo_turno sirve para Round Robin.
@@ -1740,6 +1816,16 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
         procesar_colision_si_existe(shared);
 
         imprimir_estado_tick(shared);
+
+        /*
+            BONUS: pedir a P3 que dibuje el estado de este tick y esperar a
+            que termine (exactamente un redibujado por tick). P3 solo lee la
+            memoria y toma mutex_shared un instante, asi que no frena a P1/P2.
+        */
+        if (render_enabled) {
+            sem_post(&shared->sem_render_turn);
+            sem_wait(&shared->sem_render_done);
+        }
     }
 
     /*
@@ -1783,6 +1869,14 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
     sem_post(&shared->sem_enemy_turn);
 
     /*
+        BONUS: liberar a P3 si quedo esperando turno de dibujo. Aqui
+        game_over ya vale 1, asi que P3 dibuja el cuadro final y sale.
+    */
+    if (render_enabled) {
+        sem_post(&shared->sem_render_turn);
+    }
+
+    /*
         10. Esperar procesos hijos.
     */
     int status_p1;
@@ -1793,6 +1887,12 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
 
     waitpid(pid_enemy, &status_p2, 0);
     printf("[P0] P2 finalizó correctamente\n");
+
+    if (render_enabled) {
+        int status_p3;
+        waitpid(pid_render, &status_p3, 0);
+        printf("[P0] P3 finalizó correctamente\n");
+    }
 
     /*
         11. Liberar recursos compartidos.
@@ -1809,28 +1909,34 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg) {
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
-        printf("Uso: %s Caso1 [max_ticks]\n", argv[0]);
+        printf("Uso: %s Caso1 [max_ticks] [--render]\n", argv[0]);
         return 1;
     }
 
     /*
-        Punto 10: max_ticks puede recibirse como segundo argumento.
-        Si no se indica o es invalido, se usa el valor por defecto.
+        Punto 10: max_ticks puede recibirse como argumento numerico.
+        BONUS: --render (o -r) habilita el proceso P3 (renderer).
+        Ambos son opcionales y pueden ir en cualquier orden despues del
+        caso. Sin --render, el sistema se comporta como la version base.
     */
     int max_ticks_arg = -1;
+    int render_enabled = 0;
 
-    if (argc >= 3) {
-        int valor = atoi(argv[2]);
-
-        if (valor > 0) {
-            max_ticks_arg = valor;
+    for (int i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--render") == 0 || strcmp(argv[i], "-r") == 0) {
+            render_enabled = 1;
         } else {
-            printf("[P0] max_ticks invalido '%s'; se usara el valor por defecto\n",
-                   argv[2]);
+            int valor = atoi(argv[i]);
+
+            if (valor > 0) {
+                max_ticks_arg = valor;
+            } else {
+                printf("[P0] Argumento invalido '%s'; se ignora\n", argv[i]);
+            }
         }
     }
 
-    return scheduler_process(argv[1], max_ticks_arg);
+    return scheduler_process(argv[1], max_ticks_arg, render_enabled);
 }
 
 

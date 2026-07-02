@@ -27,6 +27,14 @@ typedef struct {
     int ghost_start_x[NUM_GHOSTS];
     int ghost_start_y[NUM_GHOSTS];
 
+    /*
+        BONUS P3 (renderer_process).
+        Estado visible de los enemigos: posicion ACTUAL de cada fantasma.
+        P2 las publica en cada turno bajo mutex_shared; P3 las lee para dibujar.
+    */
+    int ghost_x[NUM_GHOSTS];
+    int ghost_y[NUM_GHOSTS];
+
     int collision_detected;
     int collision_tick;
     int collision_ghost_id;
@@ -79,6 +87,21 @@ typedef struct {
     sem_t sem_pacman_turn;
     sem_t sem_enemy_turn;
     sem_t sem_turn_done;
+
+    /*
+        BONUS P3 (renderer_process).
+
+        sem_render_turn:
+            P0 libera este semaforo cuando quiere que P3 dibuje el estado
+            del tick actual (una sola vez por tick).
+
+        sem_render_done:
+            P3 libera este semaforo cuando termino de dibujar el cuadro,
+            de modo que P0 no adelante el siguiente tick hasta que el
+            frame este listo (sincronizacion con global_tick).
+    */
+    sem_t sem_render_turn;
+    sem_t sem_render_done;
 
 } SharedData;
 
