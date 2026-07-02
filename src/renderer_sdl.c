@@ -73,6 +73,9 @@ static void dibujar_frame(SDL_Renderer *ren,
     Color azul     = {40, 60, 220};
     Color amarillo = {255, 220, 0};
     Color gris     = {30, 30, 30};
+    Color blanco   = {255, 255, 255};
+    Color azul_ojo = {0, 0, 255};
+    
     Color ghost_col[NUM_GHOSTS] = {
         {230, 30, 30},    /* A rojo    */
         {255, 120, 190},  /* B rosa    */
@@ -80,54 +83,132 @@ static void dibujar_frame(SDL_Renderer *ren,
         {255, 150, 20}    /* D naranja */
     };
 
+    // Variables estáticas para recordar la posición del tick anterior y la dirección de la boca
+    static int prev_px = -1;
+    static int prev_py = -1;
+    static enum { DIR_RIGHT, DIR_LEFT, DIR_UP, DIR_DOWN } ultima_dir = DIR_RIGHT;
+
+    // Calcular la dirección real basándonos en el desplazamiento desde el último tick
+    if (prev_px != -1 && prev_py != -1) {
+        if (pacman_x > prev_px) ultima_dir = DIR_RIGHT;
+        else if (pacman_x < prev_px) ultima_dir = DIR_LEFT;
+        else if (pacman_y > prev_py) ultima_dir = DIR_DOWN;
+        else if (pacman_y < prev_py) ultima_dir = DIR_UP;
+    }
+    
+    // Actualizar el historial para el siguiente tick
+    prev_px = pacman_x;
+    prev_py = pacman_y;
+
     usar_color(ren, negro);
     SDL_RenderClear(ren);
 
-    /* Barra superior + vidas como cuadraditos amarillos. */
+    /* Barra superior + vidas */
     usar_color(ren, gris);
     SDL_Rect barra = {0, 0, columnas * CELL, BAR_H};
     SDL_RenderFillRect(ren, &barra);
 
-    usar_color(ren, amarillo);
     for (int i = 0; i < lives; i++) {
-        SDL_Rect vida = {6 + i * 26, 6, 20, 20};
-        SDL_RenderFillRect(ren, &vida);
+        int vx = 6 + i * 26;
+        int vy = 6;
+        usar_color(ren, amarillo);
+        SDL_Rect base_vida = {vx, vy, 20, 20};
+        SDL_RenderFillRect(ren, &base_vida);
+        usar_color(ren, gris);
+        SDL_Rect boca_vida = {vx + 10, vy + 5, 10, 10};
+        SDL_RenderFillRect(ren, &boca_vida);
     }
 
-    /* Mapa + entidades. */
+    /* Laberinto y Entidades */
     for (int y = 0; y < filas; y++) {
         for (int x = 0; x < columnas; x++) {
-            SDL_Rect celda = {x * CELL, BAR_H + y * CELL, CELL, CELL};
+            int cx = x * CELL;
+            int cy = BAR_H + y * CELL;
 
-            usar_color(ren, (grid[y][x] == 'X') ? azul : negro);
-            SDL_RenderFillRect(ren, &celda);
-
-            int hay_entidad = 0;
-            Color ec = amarillo;
-
-            if (y == pacman_y && x == pacman_x) {
-                hay_entidad = 1;
-                ec = amarillo;
+            if (grid[y][x] == 'X') {
+                usar_color(ren, azul);
+                SDL_Rect celda = {cx, cy, CELL, CELL};
+                SDL_RenderFillRect(ren, &celda);
+                continue;
             }
+
+            // --- RENDER DE PAC-MAN DINÁMICO ---
+            if (y == pacman_y && x == pacman_x) {
+                usar_color(ren, amarillo);
+                
+                // Cuerpo Base
+                SDL_Rect cuerpo_centro = {cx + 4, cy + 4, CELL - 8, CELL - 8};
+                SDL_Rect cuerpo_alto   = {cx + 8, cy + 2, CELL - 16, CELL - 4};
+                SDL_Rect cuerpo_ancho  = {cx + 2, cy + 8, CELL - 4, CELL - 16};
+                SDL_RenderFillRect(ren, &cuerpo_centro);
+                SDL_RenderFillRect(ren, &cuerpo_alto);
+                SDL_RenderFillRect(ren, &cuerpo_ancho);
+
+                // Dibujar Ojo y Boca según la dirección de movimiento calculada
+                usar_color(ren, negro);
+                SDL_Rect ojo;
+                SDL_Rect boca;
+
+                switch (ultima_dir) {
+                    case DIR_RIGHT:
+                        ojo = (SDL_Rect){cx + 12, cy + 6, 4, 4};
+                        boca = (SDL_Rect){cx + CELL - 12, cy + 10, 12, 12};
+                        break;
+                    case DIR_LEFT:
+                        ojo = (SDL_Rect){cx + 14, cy + 6, 4, 4};
+                        boca = (SDL_Rect){cx, cy + 10, 12, 12};
+                        break;
+                    case DIR_UP:
+                        ojo = (SDL_Rect){cx + 6, cy + 14, 4, 4};
+                        boca = (SDL_Rect){cx + 10, cy, 12, 12};
+                        break;
+                    case DIR_DOWN:
+                        ojo = (SDL_Rect){cx + 22, cy + 14, 4, 4};
+                        boca = (SDL_Rect){cx + 10, cy + CELL - 12, 12, 12};
+                        break;
+                }
+                
+                SDL_RenderFillRect(ren, &ojo);
+                SDL_RenderFillRect(ren, &boca);
+                continue;
+            }
+
+            // --- RENDER DE FANTASMAS ---
             for (int i = 0; i < NUM_GHOSTS; i++) {
                 if (y == gy[i] && x == gx[i]) {
-                    hay_entidad = 1;
-                    ec = ghost_col[i];
-                }
-            }
+                    usar_color(ren, ghost_col[i]);
 
-            if (hay_entidad) {
-                SDL_Rect ent = {x * CELL + 4, BAR_H + y * CELL + 4,
-                                CELL - 8, CELL - 8};
-                usar_color(ren, ec);
-                SDL_RenderFillRect(ren, &ent);
+                    SDL_Rect tronco = {cx + 4, cy + 6, CELL - 8, CELL - 12};
+                    SDL_Rect domo   = {cx + 6, cy + 3, CELL - 12, 4};
+                    SDL_RenderFillRect(ren, &tronco);
+                    SDL_RenderFillRect(ren, &domo);
+
+                    SDL_Rect pie_izq  = {cx + 4,  cy + CELL - 7, 6, 4};
+                    SDL_Rect pie_med  = {cx + 13, cy + CELL - 7, 6, 4};
+                    SDL_Rect pie_der  = {cx + 22, cy + CELL - 7, 6, 4};
+                    SDL_RenderFillRect(ren, &pie_izq);
+                    SDL_RenderFillRect(ren, &pie_med);
+                    SDL_RenderFillRect(ren, &pie_der);
+
+                    usar_color(ren, blanco);
+                    SDL_Rect ojo_izq_blanco = {cx + 8,  cy + 8, 6, 8};
+                    SDL_Rect ojo_der_blanco = {cx + 18, cy + 8, 6, 8};
+                    SDL_RenderFillRect(ren, &ojo_izq_blanco);
+                    SDL_RenderFillRect(ren, &ojo_der_blanco);
+
+                    usar_color(ren, azul_ojo);
+                    int offset_pupila = (i % 2 == 0) ? 0 : 2;
+                    SDL_Rect pupila_izq = {cx + 8 + offset_pupila,  cy + 10, 4, 4};
+                    SDL_Rect pupila_der = {cx + 18 + offset_pupila, cy + 10, 4, 4};
+                    SDL_RenderFillRect(ren, &pupila_izq);
+                    SDL_RenderFillRect(ren, &pupila_der);
+                }
             }
         }
     }
 
     SDL_RenderPresent(ren);
 }
-
 /*
  * Punto de entrada de la variante SDL de P3.
  *
