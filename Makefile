@@ -30,8 +30,8 @@ all: $(TARGET)
 
 normal: clean $(TARGET)
 
-tsan: CFLAGS += -fsanitize=thread
-tsan: LDFLAGS += -fsanitize=thread
+tsan: CFLAGS += -fsanitize=thread -fno-pie
+tsan: LDFLAGS += -fsanitize=thread -no-pie
 tsan: clean $(TARGET)
 
 $(TARGET): $(SOURCES) $(HEADERS)
@@ -40,13 +40,15 @@ $(TARGET): $(SOURCES) $(HEADERS)
 clean:
 	rm -f $(TARGET)
 
-run:
+run: normal
 	./$(TARGET) Caso1
 
 # Consola (ncurses): debug a archivo, animacion en pantalla.
-run-render:
+run-render: normal
 	./$(TARGET) Caso1 40 --render > pacman_debug.log 2>&1
 
-# Ventana SDL2 (antes: make clean && make RENDER=sdl).
+# Ventana SDL2. La compilacion se fuerza para no reutilizar un binario ncurses.
 run-sdl:
+	$(MAKE) clean
+	$(MAKE) RENDER=sdl
 	./$(TARGET) Caso1 40 --render

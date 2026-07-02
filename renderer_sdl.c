@@ -165,27 +165,15 @@ void renderer_process(SharedData *shared) {
         printf("[P3-SDL] Sigo cerrando la barrera del tick sin dibujar.\n");
     }
 
-    int corriendo = 1;
+    while (1) {
+        /*
+            Mismo protocolo bloqueante que el renderer ncurses de referencia:
+            un sem_wait consumido equivale exactamente a un frame solicitado.
+        */
+        sem_wait(&shared->sem_render_turn);
 
-    while (corriendo) {
-        /* 1) Eventos SDL (ventana viva). */
         if (ui_ok) {
             procesar_eventos(shared);
-        }
-
-        /* 2) ¿Avanzo el tick? Con ventana: no bloqueante (para seguir
-              atendiendo eventos). Headless: bloqueante. */
-        int hay_tick;
-        if (ui_ok) {
-            hay_tick = (sem_trywait(&shared->sem_render_turn) == 0);
-        } else {
-            sem_wait(&shared->sem_render_turn);
-            hay_tick = 1;
-        }
-
-        if (!hay_tick) {
-            SDL_Delay(15);   /* ~60 Hz de eventos, sin busy loop */
-            continue;
         }
 
         /* 3) Copia corta del estado bajo el MISMO mutex_shared. */
@@ -231,7 +219,7 @@ void renderer_process(SharedData *shared) {
             if (ui_ok) {
                 esperar_atendiendo_eventos(shared, 2000);
             }
-            corriendo = 0;
+            break;
         } else if (ui_ok && FRAME_DELAY_MS > 0) {
             esperar_atendiendo_eventos(shared, FRAME_DELAY_MS);
         }

@@ -322,3 +322,27 @@ auditoría previa.
 **Dictamen posterior:** **entregable**, con robustez POSIX mejorable. Los tres
 fallos urgentes que afectaban la lógica o sincronización de la rúbrica fueron
 corregidos y la regresión funcional no detectó pérdidas de comportamiento.
+
+## 13. Validación reforzada del renderer P3
+
+Se alineó SDL con el protocolo bloqueante de la rama `bonus-renderer-sdl`:
+cada `sem_wait(sem_render_turn)` consume exactamente una solicitud, se copia el
+estado bajo `mutex_shared`, se dibuja fuera del lock y se confirma mediante
+`sem_render_done`.
+
+Resultados medidos:
+
+| Variante | Ticks de P0 | Frames confirmados por P3 | Exit |
+|---|---:|---:|---:|
+| ncurses | 10 | 10 | 0 |
+| SDL2 con driver dummy | 10 | 10 | 0 |
+
+P0 ahora usa una espera temporizada de cinco segundos. Si P3 termina o deja de
+confirmar frames, P0 lo recoge o finaliza, deshabilita el renderer y continúa la
+simulación. En la prueba de fallo se mató P3 con `SIGKILL`; P0 imprimió
+“Renderer deshabilitado”, continuó hasta vidas agotadas y terminó con exit 0.
+
+El Makefile también fuerza la compilación correcta en `make run-render` y
+`make run-sdl`, evitando ejecutar por accidente un binario construido con el
+backend anterior. El target TSan usa `-fno-pie -no-pie`, combinación que evitó
+el fallo `unexpected memory mapping` observado en este entorno.

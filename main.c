@@ -6,6 +6,8 @@
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <errno.h>
+#include <time.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -344,6 +346,41 @@ int esperar_hijo_correctamente(pid_t pid, const char *nombre) {
     }
 
     return 0;
+}
+
+int esperar_renderer_done(SharedData *shared, pid_t pid_render) {
+    struct timespec limite;
+
+    if (clock_gettime(CLOCK_REALTIME, &limite) == -1) {
+        perror("Error en clock_gettime");
+        return 0;
+    }
+
+    limite.tv_sec += 5;
+
+    while (sem_timedwait(&shared->sem_render_done, &limite) == -1) {
+        if (errno == EINTR) {
+            continue;
+        }
+
+        if (errno == ETIMEDOUT) {
+            int status;
+            pid_t resultado = waitpid(pid_render, &status, WNOHANG);
+
+            if (resultado == pid_render) {
+                printf("[P0] P3 terminó antes de confirmar el frame\n");
+                return -1;
+            } else {
+                printf("[P0] Timeout esperando frame de P3\n");
+            }
+        } else {
+            perror("Error esperando sem_render_done");
+        }
+
+        return 0;
+    }
+
+    return 1;
 }
 
 /*
@@ -1959,7 +1996,19 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
         */
         if (render_enabled) {
             sem_post(&shared->sem_render_turn);
-            sem_wait(&shared->sem_render_done);
+
+            int estado_renderer = esperar_renderer_done(shared, pid_render);
+
+            if (estado_renderer <= 0) {
+                if (estado_renderer == 0) {
+                    kill(pid_render, SIGTERM);
+                    waitpid(pid_render, NULL, 0);
+                }
+
+                pid_render = -1;
+                render_enabled = 0;
+                printf("[P0] Renderer deshabilitado; la simulación continúa\n");
+            }
         }
     }
 

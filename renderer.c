@@ -150,6 +150,9 @@ void renderer_process(SharedData *shared) {
                           score, lives, tick, game_over);
         }
 
+        printf("[P3] Frame confirmado para tick %d\n", tick);
+        fflush(stdout);
+
         /*
             Avisar a P0 que el cuadro ya se dibujo (cierra la barrera del
             tick: P0 no adelanta el siguiente tick hasta este post).
