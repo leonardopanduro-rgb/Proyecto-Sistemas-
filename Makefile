@@ -1,6 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -g -D_GNU_SOURCE
-LDFLAGS = -pthread
+# -lncurses lo requiere el renderer P3 (renderer.c); -pthread, el resto.
+LDFLAGS = -pthread -lncurses
 
 TARGET = pacman_concurrente
 

@@ -3,6 +3,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <ncurses.h>
 
 #include "renderer.h"
 #include "shared.h"
@@ -16,33 +17,31 @@
 #define RENDER_DELAY_US 200000
 
 /*
-    Dibuja un cuadro completo a partir de una copia local del estado.
-    Se ejecuta FUERA del mutex para no frenar a los demas procesos.
+    Dibuja un cuadro completo con ncurses a partir de una copia local del
+    estado. Se ejecuta FUERA del mutex para no frenar a los demas procesos.
 
-    'out' es normalmente la terminal real (/dev/tty), de modo que el ruido
-    de depuracion de P0/P1/P2 (que va por stdout) se pueda redirigir a un
-    archivo y en pantalla quede solo la animacion.
+    NO se limpia toda la pantalla en cada cuadro: se reescribe cada celda
+    del mapa con mvaddch (posiciones fijas) y se usa clrtoeol solo en las
+    lineas de texto de longitud variable. ncurses hace refresh() calculando
+    el minimo de cambios, asi que la consola queda dinamica y sin parpadeo.
 
     Superposicion sobre map_grid ('O' camino, 'X' pared):
     primero Pac-Man ('P') y luego los fantasmas ('A'..'D'), de modo que si
     un fantasma cae sobre Pac-Man se ve la letra del fantasma (colision).
 */
-static void dibujar_frame(FILE *out,
-                          int filas, int columnas,
+static void dibujar_frame(int filas, int columnas,
                           char grid[MAX_Y][MAX_X],
                           int pacman_y, int pacman_x,
                           int ghost_y[NUM_GHOSTS], int ghost_x[NUM_GHOSTS],
                           int score, int lives, int tick, int game_over) {
     char simbolos[NUM_GHOSTS] = {'A', 'B', 'C', 'D'};
 
-    /*
-        Anti-parpadeo: limpiar pantalla y llevar el cursor al inicio con
-        codigos ANSI antes de cada redibujado (una sola vez por tick).
-    */
-    fprintf(out, "\033[2J\033[H");
+    /* Cabecera: fila 0 y 1; el mapa arranca en la fila 3. */
+    const int fila_base = 3;
 
-    fprintf(out, "========= Pac-Man concurrente | P3 renderer =========\n");
-    fprintf(out, "Tick: %d\n\n", tick);
+    mvprintw(0, 0, "========= Pac-Man concurrente | P3 renderer (ncurses) =========");
+    mvprintw(1, 0, "Tick: %d", tick);
+    clrtoeol();
 
     for (int y = 0; y < filas; y++) {
         for (int x = 0; x < columnas; x++) {
@@ -58,18 +57,19 @@ static void dibujar_frame(FILE *out,
                 }
             }
 
-            fputc(celda, out);
+            mvaddch(fila_base + y, x, (chtype)celda);
         }
-        fputc('\n', out);
     }
 
-    fprintf(out, "\nScore: %d    Vidas: %d\n", score, lives);
+    mvprintw(fila_base + filas + 1, 0, "Score: %d    Vidas: %d", score, lives);
+    clrtoeol();
 
     if (game_over) {
-        fprintf(out, "\n===== GAME OVER =====\n");
+        mvprintw(fila_base + filas + 2, 0, "===== GAME OVER =====");
+        clrtoeol();
     }
 
-    fflush(out);
+    refresh();
 }
 
 void renderer_process(SharedData *shared) {
@@ -77,17 +77,28 @@ void renderer_process(SharedData *shared) {
     printf("[P3] PID=%d | PPID=%d\n", getpid(), getppid());
 
     /*
-        Dibujamos en la terminal real (/dev/tty) en lugar de stdout. Asi el
-        usuario puede mandar TODO el debug de P0/P1/P2 a un archivo, p. ej.:
-
-            ./pacman_concurrente Caso1 40 --render > debug.log 2>&1
-
-        y ver SOLO la animacion limpia en pantalla. Si no hay terminal
-        (ejecucion sin tty), caemos a stdout sin fallar.
+        Arrancamos ncurses sobre la terminal REAL (/dev/tty) con newterm en
+        lugar de initscr(). Ventajas:
+          - El usuario puede mandar el debug de P0/P1/P2 (stdout) a un
+            archivo con '>' y ncurses sigue dibujando en pantalla.
+          - Si no hay terminal (ejecucion headless), newterm devuelve NULL
+            y hacemos fallback SIN dibujar, pero manteniendo el handshake
+            con P0 para no colgar la simulacion.
+        Config pedida: noecho() y curs_set(0) (cursor oculto).
     */
-    FILE *out = fopen("/dev/tty", "w");
-    if (out == NULL) {
-        out = stdout;
+    FILE *tty = fopen("/dev/tty", "r+");
+    SCREEN *pantalla = NULL;
+    int ui_ok = 0;
+
+    if (tty != NULL) {
+        pantalla = newterm(NULL, tty, tty);
+
+        if (pantalla != NULL) {
+            set_term(pantalla);
+            noecho();
+            curs_set(0);
+            ui_ok = 1;
+        }
     }
 
     while (1) {
@@ -133,9 +144,11 @@ void renderer_process(SharedData *shared) {
 
         pthread_mutex_unlock(&shared->mutex_shared);
 
-        dibujar_frame(out, filas, columnas, grid,
-                      pacman_y, pacman_x, gy, gx,
-                      score, lives, tick, game_over);
+        if (ui_ok) {
+            dibujar_frame(filas, columnas, grid,
+                          pacman_y, pacman_x, gy, gx,
+                          score, lives, tick, game_over);
+        }
 
         /*
             Avisar a P0 que el cuadro ya se dibujo (cierra la barrera del
@@ -156,8 +169,14 @@ void renderer_process(SharedData *shared) {
         }
     }
 
-    if (out != stdout) {
-        fclose(out);
+    /* Restaurar la terminal a su estado normal. */
+    if (ui_ok) {
+        endwin();
+        delscreen(pantalla);
+    }
+
+    if (tty != NULL) {
+        fclose(tty);
     }
 
     printf("[P3] renderer_process finalizado\n");
