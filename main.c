@@ -203,7 +203,8 @@ void pacman_process(SharedData *shared, const char *carpeta_caso) {
             P1 avisa a P0 que terminó.
             Sin esto, P0 se queda bloqueado.
         */
-        //sem_post(&shared->sem_turn_done);
+        
+        sem_post(&shared->sem_turn_done);
     }
 
     if (archivo_pacman != NULL) {
