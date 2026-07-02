@@ -16,19 +16,6 @@ void inicializar_fantasmas_desde_shared(SharedData *shared, GhostState ghosts[])
     }
 }
 
-void imprimir_fantasmas(GhostState ghosts[]) {
-    printf("\nPosiciones actuales de fantasmas:\n");
-
-    for (int i = 0; i < NUM_GHOSTS; i++) {
-        printf("Fantasma %c en (%d,%d)\n",
-               ghosts[i].simbolo,
-               ghosts[i].y,
-               ghosts[i].x);
-    }
-
-    printf("\n");
-}
-
 void mover_fantasma(SharedData *shared, GhostState *ghost, const char *movimiento) {
     int nuevo_y = ghost->y;
     int nuevo_x = ghost->x;
@@ -74,28 +61,3 @@ void mover_fantasma(SharedData *shared, GhostState *ghost, const char *movimient
                ghost->x);
     }
 }
-
-int detectar_colision(SharedData *shared, GhostState ghosts[]) {
-    for (int i = 0; i < NUM_GHOSTS; i++) {
-        if (shared->pacman_y == ghosts[i].y &&
-            shared->pacman_x == ghosts[i].x) {
-
-            shared->collision_detected = 1;
-            shared->collision_tick = shared->global_tick;
-            shared->collision_ghost_id = ghosts[i].id;
-
-            printf("\n[COLISIÓN] Pac-Man chocó con fantasma %c\n",
-                   ghosts[i].simbolo);
-            printf("[COLISIÓN] Tick: %d\n", shared->collision_tick);
-
-            return 1;
-        }
-    }
-
-    shared->collision_detected = 0;
-    shared->collision_tick = -1;
-    shared->collision_ghost_id = -1;
-
-    return 0;
-}
-

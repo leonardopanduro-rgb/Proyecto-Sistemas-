@@ -12,7 +12,6 @@
 #include "map.h"
 #include "pacman.h"
 #include "ghost.h"
-#include "collision.h"
 #include "renderer.h"
 
 #define PRIORIDAD_MIN 1
@@ -1938,5 +1937,4 @@ int main(int argc, char *argv[]) {
 
     return scheduler_process(argv[1], max_ticks_arg, render_enabled);
 }
-
 
