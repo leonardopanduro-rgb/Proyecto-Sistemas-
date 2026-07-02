@@ -3,3 +3,10 @@ pacman_tsan
 *.log
 CasoMin/
 *.o
+build/
+experiments/
+experiments_functional/
+experiments_sync/
+.claude/
+.agents/
+.codex/

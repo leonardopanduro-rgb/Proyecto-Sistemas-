@@ -63,3 +63,24 @@ El renderer SDL requiere `sdl2-config` y las cabeceras/bibliotecas de SDL2.
 No se modificaron mutex, semáforos, colas, prioridades, procesos, hilos,
 movimientos, reglas de colisión ni condiciones de cierre. La limpieza se limita
 a código sin referencias, dependencias del build y artefactos generados.
+
+## Limpieza de artefactos y herramientas
+
+También se retiraron elementos que no forman parte del código ejecutable:
+
+| Elemento | Motivo de eliminación |
+|---|---|
+| `experiments/` | Batería antigua de estrés y resultados generados. |
+| `experiments_functional/` | Casos y logs funcionales generados durante auditorías anteriores. |
+| `experiments_sync/` | Resultados de TSan, Valgrind, procesos y sincronización ya fuera del flujo actual. |
+| `build/` | Contenía `pacman_normal`, `pacman_debug` y `pacman_tsan`, todos regenerables. |
+| `checkpoint1`, `checkpoint3`, `checkpoint4`, `checkpoint12` | Eran ejecutables ELF compilados, no fuentes ni ramas. |
+| `PLAN_EXPERIMENTACION.md` | Documento perteneciente a las baterías de experimentación eliminadas. |
+| `.claude/` | Configuración local de una herramienta asistente; no pertenece al proyecto. |
+| `pacman_debug.log` | Salida generada por una ejecución del renderer. |
+| `Caso4/`, `Caso5/`, `Caso5b/` | Casos locales no versionados y sin referencias desde código, Makefile o documentación activa. |
+
+Se añadieron reglas a `.gitignore` para impedir que `build/`, las tres carpetas
+de experimentos y directorios locales de asistentes vuelvan a incorporarse al
+repositorio. `.git` no se modificó ni eliminó, porque contiene las ramas y todo
+el historial del proyecto.
