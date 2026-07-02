@@ -276,3 +276,49 @@ presentarlo como “libre de race conditions”: hay accesos compartidos sin mut
 TSan no pudo ejecutarse. Antes de una entrega definitiva deberían corregirse
 como mínimo la carrera de `global_tick`, la disciplina de `game_over` y el falso
 positivo de colisión por “celda ocupada”.
+
+## 12. Estado posterior a las correcciones
+
+Esta sección registra los cambios realizados en la rama
+`fix/auditoria-rubrica`. Las secciones 1–11 se conservan como baseline de la
+auditoría previa.
+
+| Hallazgo baseline | Corrección aplicada | Validación | Estado nuevo |
+|---|---|---|---|
+| Carrera entre P0-main y `tick_thread` sobre `global_tick` | P0-main obtiene un snapshot de control bajo `mutex_shared`; los logs de P1/P2 usan `obtener_global_tick()`. | Revisión estática: todo acceso concurrente restante está dentro de `mutex_shared`. | Corregido |
+| Lecturas directas de `game_over` | Se añadieron `obtener_game_over()`, `establecer_game_over()` y `obtener_control_juego()`. | Caso normal, faltante, vacío e inválido pasan con los códigos esperados. | Corregido |
+| Lectura de prioridades fuera del mutex | `elegir_turno_por_prioridad()` copia ambas prioridades bajo `mutex_shared`. | Build limpio y ejecución de scheduler correcta. | Corregido |
+| Falso positivo por “celda ocupada” | Se eliminó esa tercera condición; permanecen misma celda e intercambio exacto. | Revisión estática de `collision_thread()`. | Corregido |
+| P1/P2/P3 huérfanos al morir P0 | Cada hijo configura `PR_SET_PDEATHSIG` con `SIGTERM` y verifica el PPID después de `prctl()`. | Se capturaron tres hijos, se mató P0 con `SIGKILL` y `CHILDREN_ALIVE_AFTER` quedó vacío. | Corregido en Linux |
+| Fallo de segundo/tercer `fork()` deja hijos previos | `terminar_hijos_por_error()` marca cierre, despierta, señaliza y recoge hijos antes de `munmap`. | Revisión estática de todas las ramas de error de `fork()`. | Corregido |
+| `waitpid()` siempre reportaba éxito | `esperar_hijo_correctamente()` interpreta `WIFEXITED`, `WEXITSTATUS` y `WIFSIGNALED`; el exit global refleja fallos de hijos. | Regresión normal muestra P1/P2 con salida correcta. | Corregido |
+| No había target TSan | Se añadieron `make normal` y `make tsan`. | El binario enlaza `libtsan`; el runtime todavía aborta por `unexpected memory mapping`. | Target corregido; ejecución no determinable |
+
+### Regresión posterior
+
+| Prueba | Resultado posterior |
+|---|---|
+| `make normal` | Exit 0, sin warnings. |
+| Caso1 normal | Exit 0, fin por vidas agotadas. |
+| Movimiento faltante | Exit 1, fin por error de entrada. |
+| Cinco movimientos vacíos | Exit 0, fin por agotamiento. |
+| Movimiento inválido | Exit 1, fin por error de entrada. |
+| Renderer ncurses | Compila sin warnings. |
+| Renderer SDL2 | Compila sin warnings. |
+| Muerte forzada de P0 | P1/P2/P3 terminan; no quedaron hijos vivos. |
+| TSan | Build correcto; runtime no compatible en este entorno. |
+
+### Riesgos que permanecen
+
+- No se comprueban todavía todos los retornos de `pthread_create`, `sem_init`,
+  `pthread_mutex_init` y `pthread_join`.
+- `PR_SET_PDEATHSIG` es una extensión Linux, adecuada para el entorno probado,
+  pero no POSIX portable.
+- El único buzón de prioridad de P2 conserva política implícita “última
+  solicitud gana” cuando varios fantasmas solicitan prioridad en el mismo turno.
+- TSan continúa sin producir un análisis dinámico por incompatibilidad del
+  runtime con el mapeo de memoria del entorno.
+
+**Dictamen posterior:** **entregable**, con robustez POSIX mejorable. Los tres
+fallos urgentes que afectaban la lógica o sincronización de la rúbrica fueron
+corregidos y la regresión funcional no detectó pérdidas de comportamiento.

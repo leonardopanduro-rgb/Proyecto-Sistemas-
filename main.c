@@ -3,7 +3,9 @@
 #include <string.h>
 #include <ctype.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -230,6 +232,118 @@ void liberar_memoria_compartida(SharedData *shared) {
 
 void construir_ruta(char destino[], int tam, const char *carpeta_caso, const char *archivo) {
     snprintf(destino, tam, "%s/%s", carpeta_caso, archivo);
+}
+
+int obtener_game_over(SharedData *shared) {
+    int game_over;
+
+    pthread_mutex_lock(&shared->mutex_shared);
+    game_over = shared->game_over;
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    return game_over;
+}
+
+void establecer_game_over(SharedData *shared) {
+    pthread_mutex_lock(&shared->mutex_shared);
+    shared->game_over = 1;
+    pthread_mutex_unlock(&shared->mutex_shared);
+}
+
+int obtener_global_tick(SharedData *shared) {
+    int tick;
+
+    pthread_mutex_lock(&shared->mutex_shared);
+    tick = shared->global_tick;
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    return tick;
+}
+
+void obtener_control_juego(
+    SharedData *shared,
+    int *game_over,
+    int *global_tick,
+    int *max_ticks,
+    int *pacman_lives
+) {
+    pthread_mutex_lock(&shared->mutex_shared);
+
+    *game_over = shared->game_over;
+    *global_tick = shared->global_tick;
+    *max_ticks = shared->max_ticks;
+    *pacman_lives = shared->pacman_lives;
+
+    pthread_mutex_unlock(&shared->mutex_shared);
+}
+
+void configurar_muerte_con_padre(pid_t pid_padre_esperado) {
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) {
+        perror("Error al configurar PR_SET_PDEATHSIG");
+        exit(1);
+    }
+
+    /*
+        El padre puede morir entre fork() y prctl(). Verificar PPID despues
+        cierra esa ventana y evita que el hijo continue adoptado.
+    */
+    if (getppid() != pid_padre_esperado) {
+        exit(1);
+    }
+}
+
+void terminar_hijos_por_error(
+    SharedData *shared,
+    pid_t pid_pacman,
+    pid_t pid_enemy,
+    pid_t pid_render
+) {
+    establecer_game_over(shared);
+
+    sem_post(&shared->sem_pacman_turn);
+    sem_post(&shared->sem_enemy_turn);
+    sem_post(&shared->sem_render_turn);
+
+    if (pid_pacman > 0) {
+        kill(pid_pacman, SIGTERM);
+        waitpid(pid_pacman, NULL, 0);
+    }
+
+    if (pid_enemy > 0) {
+        kill(pid_enemy, SIGTERM);
+        waitpid(pid_enemy, NULL, 0);
+    }
+
+    if (pid_render > 0) {
+        kill(pid_render, SIGTERM);
+        waitpid(pid_render, NULL, 0);
+    }
+}
+
+int esperar_hijo_correctamente(pid_t pid, const char *nombre) {
+    int status;
+
+    if (waitpid(pid, &status, 0) == -1) {
+        perror("Error en waitpid");
+        return 0;
+    }
+
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        printf("[P0] %s finalizó correctamente\n", nombre);
+        return 1;
+    }
+
+    if (WIFEXITED(status)) {
+        printf("[P0] %s terminó con código %d\n",
+               nombre,
+               WEXITSTATUS(status));
+    } else if (WIFSIGNALED(status)) {
+        printf("[P0] %s terminó por señal %d\n",
+               nombre,
+               WTERMSIG(status));
+    }
+
+    return 0;
 }
 
 /*
@@ -502,17 +616,25 @@ void procesar_solicitudes_prioridad(SharedData *shared) {
 }
 
 int elegir_turno_por_prioridad(SharedData *shared, int *ultimo_turno) {
-    printf("[P0] Prioridad Pac-Man=%d | Prioridad Enemigos=%d\n",
-           shared->prioridad_pacman,
-           shared->prioridad_enemy);
+    int prioridad_pacman;
+    int prioridad_enemy;
 
-    if (shared->prioridad_pacman > shared->prioridad_enemy) {
+    pthread_mutex_lock(&shared->mutex_shared);
+    prioridad_pacman = shared->prioridad_pacman;
+    prioridad_enemy = shared->prioridad_enemy;
+    pthread_mutex_unlock(&shared->mutex_shared);
+
+    printf("[P0] Prioridad Pac-Man=%d | Prioridad Enemigos=%d\n",
+           prioridad_pacman,
+           prioridad_enemy);
+
+    if (prioridad_pacman > prioridad_enemy) {
         printf("[P0] Pac-Man tiene mayor prioridad\n");
         *ultimo_turno = 1;
         return 1;
     }
 
-    if (shared->prioridad_enemy > shared->prioridad_pacman) {
+    if (prioridad_enemy > prioridad_pacman) {
         printf("[P0] Enemigos tienen mayor prioridad\n");
         *ultimo_turno = 2;
         return 2;
@@ -782,14 +904,14 @@ void *movement_executor_thread(void *arg) {
     while (1) {
         sem_wait(&shared->sem_pacman_turn);
 
-        if (shared->game_over == 1) {
+        if (obtener_game_over(shared)) {
             marcar_pacman_terminar(data);
             sem_post(&data->sem_estado_pacman_listo);
             break;
         }
 
         printf("[P1-executor] Turno recibido en tick %d\n",
-               shared->global_tick);
+               obtener_global_tick(shared));
 
         char movimiento[MAX_MOVE];
 
@@ -847,7 +969,7 @@ void *pacman_publisher_thread(void *arg) {
     while (1) {
         sem_wait(&data->sem_estado_pacman_listo);
 
-        if (pacman_debe_terminar(data) || shared->game_over == 1) {
+        if (pacman_debe_terminar(data) || obtener_game_over(shared)) {
             break;
         }
 
@@ -1037,7 +1159,7 @@ void *ghost_thread_generico(void *arg) {
     while (1) {
         sem_wait(&data->sem_ghost_turn[id]);
 
-        if (enemy_debe_terminar(data) || shared->game_over == 1) {
+        if (enemy_debe_terminar(data) || obtener_game_over(shared)) {
             break;
         }
 
@@ -1119,7 +1241,7 @@ void *pacman_tracker_thread(void *arg) {
     while (1) {
         sem_wait(&data->sem_tracker_start);
 
-        if (enemy_debe_terminar(data) || shared->game_over == 1) {
+        if (enemy_debe_terminar(data) || obtener_game_over(shared)) {
             break;
         }
 
@@ -1169,7 +1291,7 @@ void *collision_thread(void *arg) {
     while (1) {
         sem_wait(&data->sem_collision_start);
 
-        if (enemy_debe_terminar(data) || shared->game_over == 1) {
+        if (enemy_debe_terminar(data) || obtener_game_over(shared)) {
             break;
         }
 
@@ -1225,15 +1347,6 @@ void *collision_thread(void *arg) {
                 colision = 1;
                 motivo = "choque";
             }
-            /*
-                Celda ocupada: Pac-Man entró a la celda donde estaba el
-                fantasma antes de moverse, aunque luego se haya alejado.
-            */
-            else if (pacman_y == gpy && pacman_x == gpx) {
-                colision = 1;
-                motivo = "celda ocupada";
-            }
-
             if (colision == 1) {
                 ghost_id = data->ghosts[i].id;
                 ghost_simbolo = data->ghosts[i].simbolo;
@@ -1298,13 +1411,13 @@ void *enemy_controller(void *arg) {
     while (1) {
         sem_wait(&shared->sem_enemy_turn);
 
-        if (shared->game_over == 1) {
+        if (obtener_game_over(shared)) {
             marcar_enemy_terminar(data);
             break;
         }
 
         printf("[P2-controller] Turno recibido en tick %d\n",
-               shared->global_tick);
+               obtener_global_tick(shared));
 
         /*
             1. Actualizar copia local de Pac-Man (posición actual y anterior).
@@ -1567,9 +1680,10 @@ void *scheduler_thread(void *arg) {
 
         procesar_solicitudes_prioridad(shared);
 
+        int turno = elegir_turno_por_prioridad(shared, &data->ultimo_turno);
+
         pthread_mutex_lock(&data->mutex_scheduler);
-        data->turno_actual =
-            elegir_turno_por_prioridad(shared, &data->ultimo_turno);
+        data->turno_actual = turno;
         pthread_mutex_unlock(&data->mutex_scheduler);
 
         sem_post(&data->sem_turn_ready);
@@ -1697,6 +1811,10 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
     /*
         4. Crear P1 = pacman_process.
     */
+    /* Evita que los hijos hereden y repitan salida que stdout aun no vacio. */
+    fflush(NULL);
+
+    pid_t pid_p0 = getpid();
     pid_t pid_pacman = fork();
 
     if (pid_pacman < 0) {
@@ -1706,6 +1824,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
     }
 
     if (pid_pacman == 0) {
+        configurar_muerte_con_padre(pid_p0);
         pacman_process(shared, carpeta_caso);
     }
 
@@ -1716,11 +1835,13 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
 
     if (pid_enemy < 0) {
         perror("[P0] Error al crear P2");
+        terminar_hijos_por_error(shared, pid_pacman, -1, -1);
         liberar_memoria_compartida(shared);
         return 1;
     }
 
     if (pid_enemy == 0) {
+        configurar_muerte_con_padre(pid_p0);
         enemy_process(shared, carpeta_caso);
     }
 
@@ -1736,11 +1857,13 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
 
         if (pid_render < 0) {
             perror("[P0] Error al crear P3");
+            terminar_hijos_por_error(shared, pid_pacman, pid_enemy, -1);
             liberar_memoria_compartida(shared);
             return 1;
         }
 
         if (pid_render == 0) {
+            configurar_muerte_con_padre(pid_p0);
             renderer_process(shared);
         }
     }
@@ -1781,8 +1904,21 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
         Cada vuelta ejecuta un tick completo a través de la cadena
         tick_thread -> scheduler_thread -> signal_thread -> P1/P2.
     */
-    while (shared->game_over == 0 &&
-           shared->global_tick < shared->max_ticks) {
+    while (1) {
+        int game_over;
+        int global_tick;
+        int max_ticks;
+        int pacman_lives;
+
+        obtener_control_juego(shared,
+                              &game_over,
+                              &global_tick,
+                              &max_ticks,
+                              &pacman_lives);
+
+        if (game_over || global_tick >= max_ticks || pacman_lives <= 0) {
+            break;
+        }
 
         if (procesar_error_entrada(shared)) {
             finalizo_por_error = 1;
@@ -1834,16 +1970,29 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
         printf("\n[P0] Fin por error de entrada\n");
     } else if (finalizo_por_agotamiento) {
         printf("\n[P0] Fin por agotamiento de entradas de P1 y P2\n");
-        shared->game_over = 1;
-    } else if (shared->pacman_lives <= 0) {
+        establecer_game_over(shared);
+    } else {
+        int game_over;
+        int global_tick;
+        int max_ticks;
+        int pacman_lives;
+
+        obtener_control_juego(shared,
+                              &game_over,
+                              &global_tick,
+                              &max_ticks,
+                              &pacman_lives);
+
+        if (pacman_lives <= 0) {
         printf("\n[P0] Fin por vidas agotadas\n");
-    } else if (shared->global_tick >= shared->max_ticks) {
-        printf("\n[P0] Se alcanzó max_ticks\n");
-        shared->game_over = 1;
+        } else if (global_tick >= max_ticks) {
+            printf("\n[P0] Se alcanzó max_ticks\n");
+            establecer_game_over(shared);
+        }
     }
 
     printf("\n[P0] Condición de finalización detectada\n");
-    printf("[P0] game_over = %d\n", shared->game_over);
+    printf("[P0] game_over = %d\n", obtener_game_over(shared));
 
     /*
         8. Detener los tres hilos internos de P0.
@@ -1878,19 +2027,20 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
     /*
         10. Esperar procesos hijos.
     */
-    int status_p1;
-    int status_p2;
+    int hijos_ok = 1;
 
-    waitpid(pid_pacman, &status_p1, 0);
-    printf("[P0] P1 finalizó correctamente\n");
+    if (!esperar_hijo_correctamente(pid_pacman, "P1")) {
+        hijos_ok = 0;
+    }
 
-    waitpid(pid_enemy, &status_p2, 0);
-    printf("[P0] P2 finalizó correctamente\n");
+    if (!esperar_hijo_correctamente(pid_enemy, "P2")) {
+        hijos_ok = 0;
+    }
 
     if (render_enabled) {
-        int status_p3;
-        waitpid(pid_render, &status_p3, 0);
-        printf("[P0] P3 finalizó correctamente\n");
+        if (!esperar_hijo_correctamente(pid_render, "P3")) {
+            hijos_ok = 0;
+        }
     }
 
     /*
@@ -1901,7 +2051,7 @@ int scheduler_process(const char *carpeta_caso, int max_ticks_arg, int render_en
     printf("[P0] Recursos liberados\n");
     printf("Fin de Checkpoint 13\n");
 
-    return finalizo_por_error ? 1 : 0;
+    return (finalizo_por_error || !hijos_ok) ? 1 : 0;
 }
 
 
@@ -1937,4 +2087,3 @@ int main(int argc, char *argv[]) {
 
     return scheduler_process(argv[1], max_ticks_arg, render_enabled);
 }
-

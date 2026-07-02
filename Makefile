@@ -24,7 +24,15 @@ endif
 
 SOURCES = $(BASE_SOURCES) $(RENDER_SRC)
 
+.PHONY: all normal tsan clean run run-render run-sdl
+
 all: $(TARGET)
+
+normal: clean $(TARGET)
+
+tsan: CFLAGS += -fsanitize=thread
+tsan: LDFLAGS += -fsanitize=thread
+tsan: clean $(TARGET)
 
 $(TARGET): $(SOURCES) $(HEADERS)
 	$(CC) $(CFLAGS) $(SOURCES) -o $(TARGET) $(LDFLAGS) $(RENDER_LIBS)
